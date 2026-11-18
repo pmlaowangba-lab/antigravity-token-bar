@@ -43,7 +43,8 @@ function startTokenBarServer(options = {}) {
       }
 
       if (pathname === '/api/snapshot' || pathname === '/summary-pill') {
-        const snap = scanner.getSnapshot();
+        const convId = urlObj.searchParams.get('convId') || undefined;
+        const snap = scanner.getSnapshot({ convId });
         if (pathname === '/summary-pill') {
           return sendJson(res, 200, {
             ok: true,

@@ -13,6 +13,7 @@
     onlyFresh: localStorage.getItem('atb_only_fresh') !== '0',
     currency: localStorage.getItem('atb_ccy') === 'CNY' ? 'CNY' : 'USD',
     theme: localStorage.getItem('atb_theme') || 'auto',
+    pinnedConvId: localStorage.getItem('atb_pinned_conv') || '',
     activityTab: 'heat',
     snapshot: null
   };
@@ -24,6 +25,8 @@
 
   function fmtTokens(n) {
     const v = Math.max(0, Number(n) || 0);
+    if (v === 524_288) return '512K';
+    if (v === 1_048_576) return '1024K';
     if (v >= 1_000_000_000) return `${(v / 1e9).toFixed(2)}B`;
     if (v >= 1_000_000) return `${(v / 1e6).toFixed(1)}M`;
     if (v >= 1_000) return `${(v / 1e3).toFixed(1)}K`;
@@ -156,8 +159,24 @@
     const totalText = fmtMoney(ledger.allTime.cost.totalUSD, fx, mainCcy);
     document.getElementById('tb-strip-cost').textContent = `${todayText} · 总${totalText}`;
 
-    // 2. 顶部模型标签
+    // 2. 顶部模型标签与会话切换器
     document.getElementById('tb-active-model-chip').textContent = sess.modelLabel;
+    const sel = document.getElementById('tb-session-select');
+    if (sel && Array.isArray(snap.recentSessions)) {
+      const prevVal = state.pinnedConvId || '';
+      sel.innerHTML = '';
+      const autoOpt = document.createElement('option');
+      autoOpt.value = '';
+      autoOpt.textContent = `🎯 自动跟随最新 (${sess.title || '当前'})`;
+      sel.appendChild(autoOpt);
+      for (const item of snap.recentSessions) {
+        const opt = document.createElement('option');
+        opt.value = item.conversationId;
+        opt.textContent = `📌 ${item.title} (${fmtTokens(item.contextUsed)} · ${item.usedPercent}%)`;
+        sel.appendChild(opt);
+      }
+      sel.value = Array.from(sel.options).some(o => o.value === prevVal) ? prevVal : '';
+    }
 
     // 3. 第一行：核心用量速览 + 最新生成速度与耗时
     const ctxBadge = document.getElementById('tb-ctx-badge');
@@ -170,6 +189,11 @@
     document.getElementById('tb-ctx-used').textContent = `${fmtTokens(sess.contextUsed)} (${sess.usedPercent}%)`;
     document.getElementById('tb-ctx-limit').textContent = fmtTokens(sess.contextLimit);
     document.getElementById('tb-ctx-rem').textContent = `${fmtTokens(sess.remainingTokens)} (${sess.remainingPercent}%)`;
+    const st = sess.sessionTotals || { turns: 0, calls: 0, inputTokens: 0, cacheTokens: 0, cacheHitRate: 0, outputTokens: 0, totalUSD: 0 };
+    const cumLine = document.getElementById('tb-ctx-session-totals');
+    if (cumLine) {
+      cumLine.textContent = `单会话累计 (${st.turns} 轮 / ${st.calls} 次调用)：新增 ${fmtTokens(st.inputTokens)} + 缓存 ${fmtTokens(st.cacheTokens)} (${st.cacheHitRate}%) · 输出 ${fmtTokens(st.outputTokens)} · ≈ ${fmtMoney(st.totalUSD, fx, mainCcy)}`;
+    }
     document.getElementById('tb-ctx-note').textContent = sess.healthNote;
 
     const spdBadge = document.getElementById('tb-spd-badge');
@@ -242,7 +266,8 @@
 
   async function refreshSnapshot() {
     try {
-      const res = await fetch('/api/snapshot', { cache: 'no-store' });
+      const qs = state.pinnedConvId ? `?convId=${encodeURIComponent(state.pinnedConvId)}` : '';
+      const res = await fetch(`/api/snapshot${qs}`, { cache: 'no-store' });
       if (!res.ok) return;
       const data = await res.json();
       if (data && data.ok) {
@@ -253,6 +278,12 @@
       // 瞬时重连期间保留上一拍展示
     }
   }
+
+  document.getElementById('tb-session-select')?.addEventListener('change', e => {
+    state.pinnedConvId = e.target.value || '';
+    localStorage.setItem('atb_pinned_conv', state.pinnedConvId);
+    void refreshSnapshot();
+  });
 
   // 事件绑定：顶栏四个按钮全部统一开关同一个大看板（不再拆出杂乱小弹窗）
   for (const id of ['tb-btn-ctx', 'tb-btn-speed', 'tb-btn-tokens', 'tb-btn-cost']) {

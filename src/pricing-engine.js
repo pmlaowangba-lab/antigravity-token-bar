@@ -28,21 +28,24 @@ const MODEL_RATE_CATALOG = [
     match: /flash.*lite/i,
     key: 'gemini-flash-lite',
     label: 'Gemini Flash Lite',
-    contextLimit: 1_048_576,
+    contextLimit: 524_288,
+    physicalLimit: 1_048_576,
     tiers: [{ maxPrompt: Infinity, input: 0.1, cache: 0.025, output: 0.4 }]
   },
   {
     match: /flash/i,
     key: 'gemini-flash',
     label: 'Gemini Flash',
-    contextLimit: 1_048_576,
+    contextLimit: 524_288,
+    physicalLimit: 1_048_576,
     tiers: [{ maxPrompt: Infinity, input: 0.3, cache: 0.075, output: 2.5 }]
   },
   {
     match: /carbon/i,
     key: 'gemini-4-carbon',
     label: 'Gemini 4 Carbon',
-    contextLimit: 1_048_576,
+    contextLimit: 524_288,
+    physicalLimit: 1_048_576,
     tiers: [
       { maxPrompt: 200_000, input: 1.5, cache: 0.1, output: 10.0 },
       { maxPrompt: Infinity, input: 2.5, cache: 0.2, output: 15.0 }
@@ -52,7 +55,8 @@ const MODEL_RATE_CATALOG = [
     match: /gemini|pro|argon|hydrogen/i,
     key: 'gemini-pro',
     label: 'Gemini Pro',
-    contextLimit: 1_048_576,
+    contextLimit: 524_288,
+    physicalLimit: 1_048_576,
     tiers: [
       { maxPrompt: 200_000, input: 1.25, cache: 0.125, output: 10.0 },
       { maxPrompt: Infinity, input: 2.5, cache: 0.25, output: 15.0 }
@@ -77,7 +81,8 @@ const MODEL_RATE_CATALOG = [
 const FALLBACK_SPEC = {
   key: 'gemini-4-carbon',
   label: 'Gemini 4 Carbon',
-  contextLimit: 1_048_576,
+  contextLimit: 524_288,
+  physicalLimit: 1_048_576,
   tiers: [
     { maxPrompt: 200_000, input: 1.5, cache: 0.1, output: 10.0 },
     { maxPrompt: Infinity, input: 2.5, cache: 0.2, output: 15.0 }

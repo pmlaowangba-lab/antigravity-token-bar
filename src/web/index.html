@@ -54,6 +54,9 @@
         </svg>
         <span class="tb-board-title">本机已记录用量</span>
         <span id="tb-active-model-chip" class="tb-subtle-chip">Gemini 4 Carbon</span>
+        <select id="tb-session-select" class="tb-session-select" title="切换或锁定指定 Antigravity 聊天窗口（避免后台窗口抢焦点）">
+          <option value="">🎯 自动跟随最新对话</option>
+        </select>
       </div>
       <div class="tb-board-actions">
         <button id="tb-btn-reset-since" class="tb-action-pill" type="button" title="将当前时刻重新设为『仅算新账』起点">重置新账起点</button>
@@ -78,14 +81,15 @@
             <div id="tb-ctx-used" class="tb-mini-val">—</div>
           </div>
           <div class="tb-mini-box">
-            <div class="tb-mini-lbl">预算上限</div>
+            <div class="tb-mini-lbl">压缩水位线</div>
             <div id="tb-ctx-limit" class="tb-mini-val">—</div>
           </div>
           <div class="tb-mini-box">
-            <div class="tb-mini-lbl">剩余可用</div>
+            <div class="tb-mini-lbl">距压缩余量</div>
             <div id="tb-ctx-rem" class="tb-mini-val">—</div>
           </div>
         </div>
+        <div id="tb-ctx-session-totals" class="tb-session-cum-line">本会话累计：读取中…</div>
         <div id="tb-ctx-note" class="tb-card-foot">正在读取当前会话上下文用量…</div>
       </div>
 

@@ -112,8 +112,8 @@ test('2. log-scanner 解析本地 transcript.jsonl：提取当前会话上下文
     const snap = scanner.getSnapshot();
 
     assert.equal(snap.activeSession.contextUsed, 360_000);
-    assert.equal(snap.activeSession.contextLimit, 1_048_576);
-    assert.ok(snap.activeSession.usedPercent > 34 && snap.activeSession.usedPercent < 35);
+    assert.equal(snap.activeSession.contextLimit, 524_288, 'Carbon 默认预算上限应对齐 512K (524,288) 自动压缩水位线');
+    assert.ok(snap.activeSession.usedPercent > 68 && snap.activeSession.usedPercent < 69);
     assert.equal(snap.activeSession.speed.durationSec, 18);
     assert.equal(snap.activeSession.speed.tokensPerSec, 50);
     assert.equal(snap.activeSession.speed.outputTokens, 900);
@@ -122,6 +122,129 @@ test('2. log-scanner 解析本地 transcript.jsonl：提取当前会话上下文
     assert.equal(snap.freshLedger.allTime.totalTokens, 360_900);
     assert.equal(snap.fullLedger.allTime.totalTokens, 761_900);
   } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('4. 多窗口会话锁定、工具 Created At 精确测速（剔除工具执行与 SYSTEM 重启噪声）及单会话累计统计精确对齐', async () => {
+  const { startTokenBarServer } = require('../src/server');
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'atb-align-'));
+  const brainDir = path.join(tmpDir, 'brain');
+
+  const convLongId = '11111111-aaaa-4111-8111-111111111111';
+  const convOtherId = '22222222-bbbb-4222-8222-222222222222';
+  const convLongDir = path.join(brainDir, convLongId, '.system_generated', 'logs');
+  const convOtherDir = path.join(brainDir, convOtherId, '.system_generated', 'logs');
+  fs.mkdirSync(convLongDir, { recursive: true });
+  fs.mkdirSync(convOtherDir, { recursive: true });
+
+  // 会话 1（目标长会话）：468,111 上下文；第 1 步模型耗时 10s（工具本身额外跑了 25s，不应计入模型吐字耗时）；末尾带一条隔了 180s 的 SYSTEM 重启消息
+  fs.writeFileSync(
+    path.join(convLongDir, 'transcript.jsonl'),
+    [
+      JSON.stringify({
+        step_index: 0,
+        source: 'USER_EXPLICIT',
+        type: 'USER_INPUT',
+        created_at: '2026-11-18T12:00:00.000Z',
+        content: '<USER_REQUEST>\n写Skill实战教学五层拆解\n</USER_REQUEST><USER_SETTINGS_CHANGE>Model Selection to Gemini 4 Carbon (Medium).</USER_SETTINGS_CHANGE>'
+      }),
+      JSON.stringify({
+        step_index: 1,
+        source: 'MODEL',
+        type: 'PLANNER_RESPONSE',
+        created_at: '2026-11-18T12:00:01.000Z',
+        input_tokens: 2_778,
+        cache_read_tokens: 465_333,
+        output_tokens: 800
+      }),
+      JSON.stringify({
+        step_index: 2,
+        source: 'MODEL',
+        type: 'GENERIC',
+        // 工具跑完是 12:00:36（含 25s 命令执行），但工具 Created At 是 12:00:11（模型实际只花了 10.0s 生成！）
+        created_at: '2026-11-18T12:00:36.000Z',
+        content: 'Created At: 2026-11-18T20:00:11+08:00\nCompleted At: 2026-11-18T20:00:36+08:00\nok'
+      }),
+      JSON.stringify({
+        step_index: 3,
+        source: 'MODEL',
+        type: 'PLANNER_RESPONSE',
+        created_at: '2026-11-18T12:00:37.000Z',
+        input_tokens: 2_778,
+        cache_read_tokens: 465_333,
+        output_tokens: 881
+      }),
+      JSON.stringify({
+        step_index: 4,
+        source: 'SYSTEM',
+        type: 'USER_INPUT',
+        created_at: '2026-11-18T12:03:37.000Z',
+        content: '[Notice] All your subagents and background tasks have been stopped due to server restart.'
+      })
+    ].join('\n') + '\n'
+  );
+
+  // 会话 2（稍晚修改的短会话 184.4K）
+  fs.writeFileSync(
+    path.join(convOtherDir, 'transcript.jsonl'),
+    [
+      JSON.stringify({
+        step_index: 0,
+        source: 'USER_EXPLICIT',
+        type: 'USER_INPUT',
+        created_at: '2026-11-18T12:05:00.000Z',
+        content: '<USER_REQUEST>另一个后台窗口任务</USER_REQUEST>'
+      }),
+      JSON.stringify({
+        step_index: 1,
+        source: 'MODEL',
+        type: 'PLANNER_RESPONSE',
+        created_at: '2026-11-18T12:05:02.000Z',
+        input_tokens: 4_400,
+        cache_read_tokens: 180_000,
+        output_tokens: 300
+      })
+    ].join('\n') + '\n'
+  );
+
+  const srv = await startTokenBarServer({
+    port: 0,
+    brainRootDir: brainDir,
+    stateFilePath: path.join(tmpDir, 'state.json')
+  });
+
+  try {
+    // 锁定查询会话 1（不串台到会话 2）
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/snapshot?convId=${convLongId}`);
+    assert.equal(res.status, 200);
+    const snap = await res.json();
+
+    assert.equal(snap.activeSession.conversationId, convLongId);
+    assert.equal(snap.activeSession.contextUsed, 468_111);
+    assert.equal(snap.activeSession.contextLimit, 524_288);
+    assert.ok(Math.abs(snap.activeSession.usedPercent - 89.3) < 0.2);
+
+    // 验证工具 Created At 精确测速：800 tok / 10.0s = 80 tok/s，且绝不被末尾 180s SYSTEM 重启消息污染成 4.9 tok/s
+    assert.equal(snap.activeSession.speed.tokensPerSec, 80);
+    assert.equal(snap.activeSession.speed.durationSec, 10);
+    // 最新一步纯文字回复输出量为 881
+    assert.equal(snap.activeSession.speed.latestOutputTokens, 881);
+
+    // 验证单会话累计对照数据
+    assert.ok(snap.activeSession.sessionTotals, '缺少单会话累计 sessionTotals');
+    assert.equal(snap.activeSession.sessionTotals.turns, 1);
+    assert.equal(snap.activeSession.sessionTotals.calls, 2);
+    assert.equal(snap.activeSession.sessionTotals.inputTokens, 5_556);
+    assert.equal(snap.activeSession.sessionTotals.cacheTokens, 930_666);
+    assert.equal(snap.activeSession.sessionTotals.outputTokens, 1_681);
+
+    // 验证 recentSessions 列表返回可读标题
+    assert.equal(snap.recentSessions.length, 2);
+    const longMeta = snap.recentSessions.find(s => s.conversationId === convLongId);
+    assert.match(longMeta.title, /写Skill实战教学五层拆解/);
+  } finally {
+    await srv.close();
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });
