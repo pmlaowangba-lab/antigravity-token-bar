@@ -25,10 +25,11 @@
 
   function fmtTokens(n) {
     const v = Math.max(0, Number(n) || 0);
-    if (v === 524_288) return '512K';
+    if (v === 512_000 || v === 524_288) return '512K';
     if (v === 1_048_576) return '1024K';
     if (v >= 1_000_000_000) return `${(v / 1e9).toFixed(2)}B`;
     if (v >= 1_000_000) return `${(v / 1e6).toFixed(1)}M`;
+    if (v >= 100_000) return `${Math.round(v / 1e3)}K`;
     if (v >= 1_000) return `${(v / 1e3).toFixed(1)}K`;
     return String(Math.round(v));
   }
@@ -55,7 +56,7 @@
     state.boardOpen = Boolean(open);
     const board = document.getElementById('tb-board');
     if (board) board.hidden = !state.boardOpen;
-    for (const id of ['tb-btn-ctx', 'tb-btn-speed', 'tb-btn-tokens', 'tb-btn-cost']) {
+    for (const id of ['tb-btn-ctx', 'tb-btn-speed', 'tb-btn-cache', 'tb-btn-tokens', 'tb-btn-cost']) {
       document.getElementById(id)?.setAttribute('aria-expanded', String(state.boardOpen));
     }
     postNative('agPanelState', { open: state.boardOpen });
@@ -154,6 +155,11 @@
     document.getElementById('tb-strip-speed').textContent = sess.speed.tokensPerSec != null ? `${sess.speed.tokensPerSec} tok/s` : '-- tok/s';
     document.getElementById('tb-btn-speed').title = sess.speed.note;
 
+    const sessCacheRate = sess.sessionTotals?.cacheHitRate ?? 0;
+    const globalCacheRate = ledger.allTime.cacheHitRate ?? 0;
+    document.getElementById('tb-strip-cache').textContent = `缓 ${sessCacheRate.toFixed(1)}%`;
+    document.getElementById('tb-btn-cache').title = `当前会话累计缓存命中率：${sessCacheRate.toFixed(1)}%（本步 ${sess.stepCacheHitRate ?? 0}%）\n全局已记录总缓存命中率：${globalCacheRate.toFixed(1)}%`;
+
     document.getElementById('tb-strip-tokens').textContent = fmtTokens(ledger.allTime.totalTokens);
     const todayText = fmtMoney(ledger.today.cost.totalUSD, fx, mainCcy);
     const totalText = fmtMoney(ledger.allTime.cost.totalUSD, fx, mainCcy);
@@ -186,10 +192,15 @@
     ctxBar.style.width = `${sess.usedPercent}%`;
     ctxBar.setAttribute('data-tone', sess.healthTone);
 
-    document.getElementById('tb-ctx-used').textContent = `${fmtTokens(sess.contextUsed)} (${sess.usedPercent}%)`;
+    const roundedUsedPct = Math.round(sess.usedPercent);
+    document.getElementById('tb-ctx-used').textContent = `${fmtTokens(sess.contextUsed)} (${roundedUsedPct}%)`;
     document.getElementById('tb-ctx-limit').textContent = fmtTokens(sess.contextLimit);
-    document.getElementById('tb-ctx-rem').textContent = `${fmtTokens(sess.remainingTokens)} (${sess.remainingPercent}%)`;
+    document.getElementById('tb-ctx-rem').textContent = `${fmtTokens(sess.remainingTokens)} (${100 - roundedUsedPct}%)`;
     const st = sess.sessionTotals || { turns: 0, calls: 0, inputTokens: 0, cacheTokens: 0, cacheHitRate: 0, outputTokens: 0, totalUSD: 0 };
+    const ctxCacheEl = document.getElementById('tb-ctx-cache-rate');
+    if (ctxCacheEl) {
+      ctxCacheEl.textContent = `${st.cacheHitRate.toFixed(1)}%`;
+    }
     const cumLine = document.getElementById('tb-ctx-session-totals');
     if (cumLine) {
       cumLine.textContent = `单会话累计 (${st.turns} 轮 / ${st.calls} 次调用)：新增 ${fmtTokens(st.inputTokens)} + 缓存 ${fmtTokens(st.cacheTokens)} (${st.cacheHitRate}%) · 输出 ${fmtTokens(st.outputTokens)} · ≈ ${fmtMoney(st.totalUSD, fx, mainCcy)}`;
@@ -238,21 +249,25 @@
     document.getElementById('tb-cost-breakdown').textContent =
       `今日费用拆分：未缓存输入 ${fmtMoney(ledger.today.cost.inputUSD, fx, mainCcy)} · 缓存读取 ${fmtMoney(ledger.today.cost.cacheUSD, fx, mainCcy)} · 输出 ${fmtMoney(ledger.today.cost.outputUSD, fx, mainCcy)}`;
 
-    // 5. 第三行：4 周期 Token 卡片
+    // 5. 第三行：4 周期 Token 卡片（含各周期缓存命中率与缓存量）
     document.getElementById('tb-tok-total-val').textContent = fmtTokens(ledger.allTime.totalTokens);
+    document.getElementById('tb-tok-total-cache').textContent = `缓存命中率 ${ledger.allTime.cacheHitRate.toFixed(1)}% · 缓存 ${fmtTokens(ledger.allTime.cacheTokens)}`;
     document.getElementById('tb-tok-total-meta').textContent = `${ledger.allTime.totalTokens.toLocaleString()} Tokens`;
     document.getElementById('tb-tok-total-cost').textContent = `≈ $${ledger.allTime.cost.totalUSD.toFixed(2)} (¥${ledger.allTime.cost.totalCNY.toFixed(2)})`;
 
     document.getElementById('tb-tok-today-val').textContent = fmtTokens(ledger.today.totalTokens);
+    document.getElementById('tb-tok-today-cache').textContent = `缓存命中率 ${ledger.today.cacheHitRate.toFixed(1)}% · 缓存 ${fmtTokens(ledger.today.cacheTokens)}`;
     document.getElementById('tb-tok-today-meta').textContent = `${ledger.today.sessionsCount} 会话实时累加`;
     document.getElementById('tb-tok-today-cost').textContent = `≈ $${ledger.today.cost.totalUSD.toFixed(2)} (¥${ledger.today.cost.totalCNY.toFixed(2)})`;
 
     const monthAvgTok = ledger.month.activeDays > 0 ? ledger.month.totalTokens / ledger.month.activeDays : 0;
     document.getElementById('tb-tok-month-val').textContent = fmtTokens(ledger.month.totalTokens);
+    document.getElementById('tb-tok-month-cache').textContent = `缓存命中率 ${ledger.month.cacheHitRate.toFixed(1)}% · 缓存 ${fmtTokens(ledger.month.cacheTokens)}`;
     document.getElementById('tb-tok-month-meta').textContent = `日均约 ${fmtTokens(monthAvgTok)}`;
     document.getElementById('tb-tok-month-cost').textContent = `≈ $${ledger.month.cost.totalUSD.toFixed(2)} (¥${ledger.month.cost.totalCNY.toFixed(2)})`;
 
     document.getElementById('tb-tok-year-val').textContent = fmtTokens(ledger.year.totalTokens);
+    document.getElementById('tb-tok-year-cache').textContent = `缓存命中率 ${ledger.year.cacheHitRate.toFixed(1)}% · 缓存 ${fmtTokens(ledger.year.cacheTokens)}`;
     document.getElementById('tb-tok-year-meta').textContent = `${ledger.year.activeDays} 天活动记录`;
     document.getElementById('tb-tok-year-cost').textContent = `≈ $${ledger.year.cost.totalUSD.toFixed(2)} (¥${ledger.year.cost.totalCNY.toFixed(2)})`;
 
@@ -285,8 +300,8 @@
     void refreshSnapshot();
   });
 
-  // 事件绑定：顶栏四个按钮全部统一开关同一个大看板（不再拆出杂乱小弹窗）
-  for (const id of ['tb-btn-ctx', 'tb-btn-speed', 'tb-btn-tokens', 'tb-btn-cost']) {
+  // 事件绑定：顶栏五个按钮全部统一开关同一个大看板（不再拆出杂乱小弹窗）
+  for (const id of ['tb-btn-ctx', 'tb-btn-speed', 'tb-btn-cache', 'tb-btn-tokens', 'tb-btn-cost']) {
     document.getElementById(id)?.addEventListener('click', () => {
       syncBoardOpen(!state.boardOpen);
     });

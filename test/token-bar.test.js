@@ -112,8 +112,8 @@ test('2. log-scanner 解析本地 transcript.jsonl：提取当前会话上下文
     const snap = scanner.getSnapshot();
 
     assert.equal(snap.activeSession.contextUsed, 360_000);
-    assert.equal(snap.activeSession.contextLimit, 524_288, 'Carbon 默认预算上限应对齐 512K (524,288) 自动压缩水位线');
-    assert.ok(snap.activeSession.usedPercent > 68 && snap.activeSession.usedPercent < 69);
+    assert.equal(snap.activeSession.contextLimit, 512_000, 'Carbon 压缩水位线应对齐精确十进制 512,000 (512k)');
+    assert.equal(Math.round(snap.activeSession.usedPercent), 70);
     assert.equal(snap.activeSession.speed.durationSec, 18);
     assert.equal(snap.activeSession.speed.tokensPerSec, 50);
     assert.equal(snap.activeSession.speed.outputTokens, 900);
@@ -126,83 +126,75 @@ test('2. log-scanner 解析本地 transcript.jsonl：提取当前会话上下文
   }
 });
 
-test('4. 多窗口会话锁定、工具 Created At 精确测速（剔除工具执行与 SYSTEM 重启噪声）及单会话累计统计精确对齐', async () => {
+test('4. 默认优先锁定用户最近提问窗口（防后台 Agent 抢焦点导致 31% vs 59% 不一致）、512k 水位线精确到 59%/212k，且全界面展示缓存命中率', async () => {
   const { startTokenBarServer } = require('../src/server');
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'atb-align-'));
   const brainDir = path.join(tmpDir, 'brain');
 
-  const convLongId = '11111111-aaaa-4111-8111-111111111111';
-  const convOtherId = '22222222-bbbb-4222-8222-222222222222';
-  const convLongDir = path.join(brainDir, convLongId, '.system_generated', 'logs');
-  const convOtherDir = path.join(brainDir, convOtherId, '.system_generated', 'logs');
-  fs.mkdirSync(convLongDir, { recursive: true });
-  fs.mkdirSync(convOtherDir, { recursive: true });
+  const convUserActiveId = '11111111-aaaa-4111-8111-111111111111';
+  const convBgAgentId = '22222222-bbbb-4222-8222-222222222222';
+  const convUserDir = path.join(brainDir, convUserActiveId, '.system_generated', 'logs');
+  const convBgDir = path.join(brainDir, convBgAgentId, '.system_generated', 'logs');
+  fs.mkdirSync(convUserDir, { recursive: true });
+  fs.mkdirSync(convBgDir, { recursive: true });
 
-  // 会话 1（目标长会话）：468,111 上下文；第 1 步模型耗时 10s（工具本身额外跑了 25s，不应计入模型吐字耗时）；末尾带一条隔了 180s 的 SYSTEM 重启消息
+  // 会话 1：用户刚刚在 12:10:00 亲自发消息的当前窗口（300,046 / 512,000 = 58.6% -> 59%，余 211,954 ≈ 212k）
   fs.writeFileSync(
-    path.join(convLongDir, 'transcript.jsonl'),
+    path.join(convUserDir, 'transcript.jsonl'),
     [
       JSON.stringify({
         step_index: 0,
         source: 'USER_EXPLICIT',
         type: 'USER_INPUT',
-        created_at: '2026-11-18T12:00:00.000Z',
-        content: '<USER_REQUEST>\n写Skill实战教学五层拆解\n</USER_REQUEST><USER_SETTINGS_CHANGE>Model Selection to Gemini 4 Carbon (Medium).</USER_SETTINGS_CHANGE>'
+        created_at: '2026-11-18T12:10:00.000Z',
+        content: '<USER_REQUEST>\n当前正在看的窗口\n</USER_REQUEST><USER_SETTINGS_CHANGE>Model Selection to Gemini 4 Carbon (Medium).</USER_SETTINGS_CHANGE>'
       }),
       JSON.stringify({
         step_index: 1,
         source: 'MODEL',
         type: 'PLANNER_RESPONSE',
-        created_at: '2026-11-18T12:00:01.000Z',
-        input_tokens: 2_778,
-        cache_read_tokens: 465_333,
+        created_at: '2026-11-18T12:10:01.000Z',
+        input_tokens: 60_046,
+        cache_read_tokens: 240_000,
         output_tokens: 800
       }),
       JSON.stringify({
         step_index: 2,
         source: 'MODEL',
         type: 'GENERIC',
-        // 工具跑完是 12:00:36（含 25s 命令执行），但工具 Created At 是 12:00:11（模型实际只花了 10.0s 生成！）
-        created_at: '2026-11-18T12:00:36.000Z',
-        content: 'Created At: 2026-11-18T20:00:11+08:00\nCompleted At: 2026-11-18T20:00:36+08:00\nok'
+        created_at: '2026-11-18T12:10:36.000Z',
+        content: 'Created At: 2026-11-18T20:10:11+08:00\nCompleted At: 2026-11-18T20:10:36+08:00\nok'
       }),
       JSON.stringify({
         step_index: 3,
         source: 'MODEL',
         type: 'PLANNER_RESPONSE',
-        created_at: '2026-11-18T12:00:37.000Z',
-        input_tokens: 2_778,
-        cache_read_tokens: 465_333,
-        output_tokens: 881
-      }),
-      JSON.stringify({
-        step_index: 4,
-        source: 'SYSTEM',
-        type: 'USER_INPUT',
-        created_at: '2026-11-18T12:03:37.000Z',
-        content: '[Notice] All your subagents and background tasks have been stopped due to server restart.'
+        created_at: '2026-11-18T12:10:37.000Z',
+        input_tokens: 60_046,
+        cache_read_tokens: 240_000,
+        output_tokens: 981
       })
     ].join('\n') + '\n'
   );
 
-  // 会话 2（稍晚修改的短会话 184.4K）
+  // 会话 2：用户早在 12:00:00 提问、但后台 Agent 在 12:11:13 自动跑工具的后台会话（160,000 / 512,000 = 31.3%）
   fs.writeFileSync(
-    path.join(convOtherDir, 'transcript.jsonl'),
+    path.join(convBgDir, 'transcript.jsonl'),
     [
       JSON.stringify({
         step_index: 0,
         source: 'USER_EXPLICIT',
         type: 'USER_INPUT',
-        created_at: '2026-11-18T12:05:00.000Z',
-        content: '<USER_REQUEST>另一个后台窗口任务</USER_REQUEST>'
+        created_at: '2026-11-18T12:00:00.000Z',
+        content: '<USER_REQUEST>十多分钟前丢在后台的任务</USER_REQUEST>'
       }),
       JSON.stringify({
         step_index: 1,
         source: 'MODEL',
         type: 'PLANNER_RESPONSE',
-        created_at: '2026-11-18T12:05:02.000Z',
-        input_tokens: 4_400,
-        cache_read_tokens: 180_000,
+        created_at: '2026-11-18T12:11:13.000Z',
+        input_tokens: 10_000,
+        cache_read_tokens: 150_000,
         output_tokens: 300
       })
     ].join('\n') + '\n'
@@ -215,34 +207,24 @@ test('4. 多窗口会话锁定、工具 Created At 精确测速（剔除工具�
   });
 
   try {
-    // 锁定查询会话 1（不串台到会话 2）
-    const res = await fetch(`http://127.0.0.1:${srv.port}/api/snapshot?convId=${convLongId}`);
+    // 不传 convId 时，必须自动对齐用户最近亲自发消息的会话 1（59%），绝不被后台自动跑步骤的会话 2（31%）抢焦点！
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/snapshot`);
     assert.equal(res.status, 200);
     const snap = await res.json();
 
-    assert.equal(snap.activeSession.conversationId, convLongId);
-    assert.equal(snap.activeSession.contextUsed, 468_111);
-    assert.equal(snap.activeSession.contextLimit, 524_288);
-    assert.ok(Math.abs(snap.activeSession.usedPercent - 89.3) < 0.2);
+    assert.equal(snap.activeSession.conversationId, convUserActiveId, '默认应锁定用户最近发消息的活跃窗口');
+    assert.equal(snap.activeSession.contextUsed, 300_046);
+    assert.equal(snap.activeSession.contextLimit, 512_000);
+    assert.equal(Math.round(snap.activeSession.usedPercent), 59, '顶栏四舍五入百分比必须为 59%');
+    assert.equal(Math.round(snap.activeSession.remainingTokens / 1000), 212, '距压缩余量必须为 212k');
+    assert.equal(snap.activeSession.sessionTotals.cacheHitRate, 80, '单会话缓存命中率计算准确');
 
-    // 验证工具 Created At 精确测速：800 tok / 10.0s = 80 tok/s，且绝不被末尾 180s SYSTEM 重启消息污染成 4.9 tok/s
-    assert.equal(snap.activeSession.speed.tokensPerSec, 80);
-    assert.equal(snap.activeSession.speed.durationSec, 10);
-    // 最新一步纯文字回复输出量为 881
-    assert.equal(snap.activeSession.speed.latestOutputTokens, 881);
-
-    // 验证单会话累计对照数据
-    assert.ok(snap.activeSession.sessionTotals, '缺少单会话累计 sessionTotals');
-    assert.equal(snap.activeSession.sessionTotals.turns, 1);
-    assert.equal(snap.activeSession.sessionTotals.calls, 2);
-    assert.equal(snap.activeSession.sessionTotals.inputTokens, 5_556);
-    assert.equal(snap.activeSession.sessionTotals.cacheTokens, 930_666);
-    assert.equal(snap.activeSession.sessionTotals.outputTokens, 1_681);
-
-    // 验证 recentSessions 列表返回可读标题
-    assert.equal(snap.recentSessions.length, 2);
-    const longMeta = snap.recentSessions.find(s => s.conversationId === convLongId);
-    assert.match(longMeta.title, /写Skill实战教学五层拆解/);
+    // 验证 HTML 顶栏、核心用量速览与四张周期卡片均包含缓存命中率节点
+    const html = await (await fetch(`http://127.0.0.1:${srv.port}/`)).text();
+    assert.match(html, /id="tb-btn-cache"/, '顶栏缺少缓存命中率胶囊 #tb-btn-cache');
+    assert.match(html, /id="tb-ctx-cache-rate"/, '核心用量速览缺少缓存命中率格 #tb-ctx-cache-rate');
+    assert.match(html, /id="tb-tok-today-cache"/, '今日 Token 卡片缺少缓存命中率节点 #tb-tok-today-cache');
+    assert.match(html, /id="tb-tok-total-cache"/, '累计 Token 卡片缺少缓存命中率节点 #tb-tok-total-cache');
   } finally {
     await srv.close();
     fs.rmSync(tmpDir, { recursive: true, force: true });

@@ -89,6 +89,7 @@ function parseConversationLog(filePath, convId, mtimeMs) {
   let firstTitle = '';
   let userTurns = 0;
   let lastRealActivityMs = 0;
+  let lastUserExplicitMs = 0;
 
   for (const line of lines) {
     const trimmed = line.trim();
@@ -110,6 +111,9 @@ function parseConversationLog(filePath, convId, mtimeMs) {
       }
       if (obj.type === 'USER_INPUT' && !isSystemMsg) {
         userTurns += 1;
+        if (obj.source === 'USER_EXPLICIT' || obj.content.includes('<USER_REQUEST>')) {
+          if (tsMs > lastUserExplicitMs) lastUserExplicitMs = tsMs;
+        }
         if (!firstTitle) {
           const reqMatch = obj.content.match(USER_REQUEST_REGEX);
           const candidate = cleanUserTitle(reqMatch ? reqMatch[1] : obj.content);
@@ -212,6 +216,7 @@ function parseConversationLog(filePath, convId, mtimeMs) {
     convId,
     title: firstTitle || `会话 ${convId.slice(0, 8)}`,
     mtimeMs,
+    lastUserExplicitMs,
     lastRealActivityMs: lastRealActivityMs || mtimeMs,
     latestModel: activeModelName,
     steps: plannerSteps,
@@ -264,11 +269,12 @@ function buildActiveSessionView(parsedConv) {
       title: parsedConv?.title || '暂无活跃会话',
       modelLabel: parsedConv?.latestModel || 'Gemini 4 Carbon',
       contextUsed: 0,
-      contextLimit: 524_288,
+      contextLimit: 512_000,
       physicalLimit: 1_048_576,
-      remainingTokens: 524_288,
+      remainingTokens: 512_000,
       usedPercent: 0,
       remainingPercent: 100,
+      stepCacheHitRate: 0,
       healthTone: 'good',
       healthLabel: '空闲',
       healthNote: '等待当前会话产生首次模型请求…',
@@ -298,11 +304,12 @@ function buildActiveSessionView(parsedConv) {
   const lastWithSpeed = [...parsedConv.steps].reverse().find(s => s.tokensPerSec != null) || null;
 
   const contextUsed = last.inputTokens + last.cacheTokens;
-  const contextLimit = last.contextLimit || 524_288;
+  const contextLimit = last.contextLimit || 512_000;
   const physicalLimit = last.physicalLimit || contextLimit;
   const remainingTokens = Math.max(0, contextLimit - contextUsed);
   const usedPercent = Number(Math.min(100, (contextUsed / contextLimit) * 100).toFixed(1));
   const remainingPercent = Number(Math.max(0, 100 - usedPercent).toFixed(1));
+  const stepCacheHitRate = contextUsed > 0 ? Number(((last.cacheTokens / contextUsed) * 100).toFixed(1)) : 0;
 
   let healthTone = 'good';
   let healthLabel = '正常';
@@ -378,6 +385,7 @@ function buildActiveSessionView(parsedConv) {
     remainingTokens,
     usedPercent,
     remainingPercent,
+    stepCacheHitRate,
     healthTone,
     healthLabel,
     healthNote,
@@ -453,8 +461,8 @@ function createLogScanner(options = {}) {
       }
     }
 
-    // 按真实模型/用户活动时间倒序排列（忽略纯 SYSTEM 广播通知导致的假 mtime 跳变）
-    parsedList.sort((a, b) => b.lastRealActivityMs - a.lastRealActivityMs);
+    // 优先按用户最近亲自发送消息的时间排序（保证锁定用户当前正在交互的窗口，不被后台自动循环跑工具的其他 Agent 抢焦点）
+    parsedList.sort((a, b) => (b.lastUserExplicitMs - a.lastUserExplicitMs) || (b.lastRealActivityMs - a.lastRealActivityMs));
 
     const requestedConvId = typeof query.convId === 'string' && query.convId.trim() ? query.convId.trim() : null;
     const targetParsed = (requestedConvId && parsedList.find(p => p.convId === requestedConvId)) || parsedList[0] || null;
@@ -462,8 +470,8 @@ function createLogScanner(options = {}) {
     const recentSessions = parsedList.slice(0, 12).map(p => {
       const last = p.steps[p.steps.length - 1];
       const used = last ? (last.inputTokens + last.cacheTokens) : 0;
-      const lim = last?.contextLimit || 524_288;
-      const pct = Number(Math.min(100, (used / lim) * 100).toFixed(0));
+      const lim = last?.contextLimit || 512_000;
+      const pct = Math.min(100, Math.round((used / lim) * 100));
       return {
         conversationId: p.convId,
         title: p.title,

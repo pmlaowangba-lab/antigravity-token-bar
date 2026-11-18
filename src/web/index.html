@@ -30,6 +30,11 @@
       <span id="tb-strip-speed">-- tok/s</span>
     </button>
 
+    <button id="tb-btn-cache" class="tb-pill-btn tb-pill-cache" type="button" title="缓存命中率（当前会话 / 全局累计）">
+      <span class="tb-ico" aria-hidden="true">♻️</span>
+      <span id="tb-strip-cache">缓 --%</span>
+    </button>
+
     <button id="tb-btn-tokens" class="tb-pill-btn" type="button" title="已记录累计 Token 总量">
       <span class="tb-ico tb-ico-bars" aria-hidden="true">
         <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round">
@@ -75,7 +80,7 @@
         <div class="tb-progress-track">
           <div id="tb-ctx-bar" class="tb-progress-fill" style="width: 0%"></div>
         </div>
-        <div class="tb-mini-grid tb-mini-grid-3">
+        <div class="tb-mini-grid tb-mini-grid-4">
           <div class="tb-mini-box">
             <div class="tb-mini-lbl">当前已用</div>
             <div id="tb-ctx-used" class="tb-mini-val">—</div>
@@ -87,6 +92,10 @@
           <div class="tb-mini-box">
             <div class="tb-mini-lbl">距压缩余量</div>
             <div id="tb-ctx-rem" class="tb-mini-val">—</div>
+          </div>
+          <div class="tb-mini-box">
+            <div class="tb-mini-lbl">缓存命中率</div>
+            <div id="tb-ctx-cache-rate" class="tb-mini-val tb-val-emerald">—</div>
           </div>
         </div>
         <div id="tb-ctx-session-totals" class="tb-session-cum-line">本会话累计：读取中…</div>
@@ -166,24 +175,28 @@
       <div class="tb-card tb-period-card">
         <div class="tb-period-top"><span>累计处理 Token</span><span class="tb-period-tag">Total</span></div>
         <div id="tb-tok-total-val" class="tb-period-val">0</div>
+        <div id="tb-tok-total-cache" class="tb-period-cache">缓存命中率 0.0%</div>
         <div id="tb-tok-total-meta" class="tb-period-meta">0 Tokens</div>
         <div id="tb-tok-total-cost" class="tb-period-sub">≈ $0.00 (¥0.00)</div>
       </div>
       <div class="tb-card tb-period-card">
         <div class="tb-period-top"><span>今日使用</span><span class="tb-period-tag tb-tag-cyan">Today</span></div>
         <div id="tb-tok-today-val" class="tb-period-val">0</div>
+        <div id="tb-tok-today-cache" class="tb-period-cache">缓存命中率 0.0%</div>
         <div id="tb-tok-today-meta" class="tb-period-meta">0 会话实时累加</div>
         <div id="tb-tok-today-cost" class="tb-period-sub">≈ $0.00 (¥0.00)</div>
       </div>
       <div class="tb-card tb-period-card">
         <div class="tb-period-top"><span>本月使用</span><span class="tb-period-tag">Month</span></div>
         <div id="tb-tok-month-val" class="tb-period-val">0</div>
+        <div id="tb-tok-month-cache" class="tb-period-cache">缓存命中率 0.0%</div>
         <div id="tb-tok-month-meta" class="tb-period-meta">日均约 0</div>
         <div id="tb-tok-month-cost" class="tb-period-sub">≈ $0.00 (¥0.00)</div>
       </div>
       <div class="tb-card tb-period-card">
         <div class="tb-period-top"><span>年度使用</span><span class="tb-period-tag">Year</span></div>
         <div id="tb-tok-year-val" class="tb-period-val">0</div>
+        <div id="tb-tok-year-cache" class="tb-period-cache">缓存命中率 0.0%</div>
         <div id="tb-tok-year-meta" class="tb-period-meta">0 天活动记录</div>
         <div id="tb-tok-year-cost" class="tb-period-sub">≈ $0.00 (¥0.00)</div>
       </div>

@@ -189,6 +189,10 @@ body.is-standalone .tb-drag-grip {
   font-weight: 600;
   color: var(--tb-emerald);
 }
+.tb-pill-cache {
+  color: var(--tb-emerald);
+  font-weight: 500;
+}
 .tb-ico {
   display: inline-flex;
   align-items: center;
@@ -559,7 +563,13 @@ html[data-theme="dark"] .tb-status-pill[data-tone="danger"] {
   font-size: 18px;
   font-weight: 700;
   letter-spacing: -0.02em;
-  margin-bottom: 3px;
+  margin-bottom: 2px;
+}
+.tb-period-cache {
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--tb-emerald);
+  margin-bottom: 2px;
 }
 .tb-period-meta {
   font-size: 10px;
