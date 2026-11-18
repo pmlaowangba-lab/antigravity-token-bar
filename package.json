@@ -1,0 +1,24 @@
+{
+  "name": "antigravity-token-bar",
+  "version": "1.0.0",
+  "description": "Native top-bar context, generation speed, token usage & API cost dashboard for Antigravity",
+  "author": "pmlaowangba",
+  "license": "MIT",
+  "main": "src/server.js",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --no-warnings --test test/token-bar.test.js",
+    "macos:build": "bash scripts/build-macos-app.sh",
+    "macos:start": "bash scripts/start-macos-bar.sh"
+  },
+  "keywords": [
+    "antigravity",
+    "token-usage",
+    "api-cost",
+    "context-window",
+    "macos-menubar"
+  ]
+}

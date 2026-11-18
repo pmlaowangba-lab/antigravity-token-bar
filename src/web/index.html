@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="auto">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Antigravity Token Bar</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div id="tb-standalone-banner" class="tb-standalone-banner" hidden>
+    <div class="tb-standalone-brand">Antigravity Token Bar · 本地实时会话与 API 成本看板</div>
+    <div class="tb-standalone-hint">点击右上角任一指标可收起/展开看板 · 右键金额切换 USD / CNY</div>
+  </div>
+
+  <!-- 顶部贴顶指标条 -->
+  <header id="tb-strip" class="tb-strip" role="toolbar" aria-label="Antigravity 实时指标栏">
+    <span id="tb-drag-grip" class="tb-drag-grip" title="按住拖动可微调标题栏位置">⋮⋮</span>
+
+    <button id="tb-btn-ctx" class="tb-pill-btn" type="button" title="当前会话上下文占用">
+      <svg class="tb-ring-svg" width="16" height="16" viewBox="0 0 18 18" aria-hidden="true">
+        <circle class="tb-ring-track" cx="9" cy="9" r="6.5" fill="none" stroke-width="2.2"></circle>
+        <circle id="tb-ring-progress" class="tb-ring-progress" cx="9" cy="9" r="6.5" fill="none" stroke-width="2.2"
+          stroke-linecap="round" transform="rotate(-90 9 9)" stroke-dasharray="0 40.84"></circle>
+      </svg>
+      <span id="tb-strip-ctx">--%</span>
+    </button>
+
+    <button id="tb-btn-speed" class="tb-pill-btn" type="button" title="最新模型生成速度与耗时">
+      <span class="tb-ico" aria-hidden="true">⚡</span>
+      <span id="tb-strip-speed">-- tok/s</span>
+    </button>
+
+    <button id="tb-btn-tokens" class="tb-pill-btn" type="button" title="已记录累计 Token 总量">
+      <span class="tb-ico tb-ico-bars" aria-hidden="true">
+        <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round">
+          <path d="M3 13V9M8 13V4M13 13V7"></path>
+        </svg>
+      </span>
+      <span id="tb-strip-tokens">0</span>
+    </button>
+
+    <button id="tb-btn-cost" class="tb-pill-btn tb-pill-cost" type="button" title="左键打开看板 · 右键切换 USD / CNY">
+      <span class="tb-ico" aria-hidden="true">💰</span>
+      <span id="tb-strip-cost">$0.00</span>
+    </button>
+  </header>
+
+  <!-- 统一展开大看板（集成实时会话双卡 + API 折算汇总金额 + 周期 Token 统计 + 52 周热力图） -->
+  <main id="tb-board" class="tb-board" hidden aria-label="本机已记录用量与会话看板">
+    <div class="tb-board-header">
+      <div class="tb-board-title-group">
+        <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" class="tb-accent-svg">
+          <path d="M3 13V9M8 13V4M13 13V7"></path>
+        </svg>
+        <span class="tb-board-title">本机已记录用量</span>
+        <span id="tb-active-model-chip" class="tb-subtle-chip">Gemini 4 Carbon</span>
+      </div>
+      <div class="tb-board-actions">
+        <button id="tb-btn-reset-since" class="tb-action-pill" type="button" title="将当前时刻重新设为『仅算新账』起点">重置新账起点</button>
+        <button id="tb-btn-theme" class="tb-icon-btn" type="button" title="切换浅色 / 深色 / 跟随系统">🌓</button>
+        <button id="tb-btn-close" class="tb-icon-btn" type="button" title="收起面板">×</button>
+      </div>
+    </div>
+
+    <!-- 第一行：核心用量速览 + 最新生成速度与耗时 双卡并排 -->
+    <section class="tb-session-pair">
+      <div class="tb-card tb-session-card">
+        <div class="tb-card-head">
+          <span class="tb-card-title">⭐ 核心用量速览</span>
+          <span id="tb-ctx-badge" class="tb-status-pill" data-tone="good">正常</span>
+        </div>
+        <div class="tb-progress-track">
+          <div id="tb-ctx-bar" class="tb-progress-fill" style="width: 0%"></div>
+        </div>
+        <div class="tb-mini-grid tb-mini-grid-3">
+          <div class="tb-mini-box">
+            <div class="tb-mini-lbl">当前已用</div>
+            <div id="tb-ctx-used" class="tb-mini-val">—</div>
+          </div>
+          <div class="tb-mini-box">
+            <div class="tb-mini-lbl">预算上限</div>
+            <div id="tb-ctx-limit" class="tb-mini-val">—</div>
+          </div>
+          <div class="tb-mini-box">
+            <div class="tb-mini-lbl">剩余可用</div>
+            <div id="tb-ctx-rem" class="tb-mini-val">—</div>
+          </div>
+        </div>
+        <div id="tb-ctx-note" class="tb-card-foot">正在读取当前会话上下文用量…</div>
+      </div>
+
+      <div class="tb-card tb-session-card">
+        <div class="tb-card-head">
+          <span class="tb-card-title">⚡ 最新生成速度与耗时</span>
+          <span id="tb-spd-badge" class="tb-status-pill" data-tone="muted">待生成</span>
+        </div>
+        <div class="tb-mini-grid tb-mini-grid-4">
+          <div class="tb-mini-box">
+            <div class="tb-mini-lbl">输出速度</div>
+            <div id="tb-spd-rate" class="tb-mini-val">—</div>
+          </div>
+          <div class="tb-mini-box">
+            <div class="tb-mini-lbl">生成耗时</div>
+            <div id="tb-spd-dur" class="tb-mini-val">—</div>
+          </div>
+          <div class="tb-mini-box">
+            <div class="tb-mini-lbl">首字延迟</div>
+            <div id="tb-spd-ttft" class="tb-mini-val">—</div>
+          </div>
+          <div class="tb-mini-box">
+            <div class="tb-mini-lbl">本次输出</div>
+            <div id="tb-spd-out" class="tb-mini-val">—</div>
+          </div>
+        </div>
+        <div id="tb-spd-note" class="tb-card-foot">等待模型输出后自动计算速度与耗时…</div>
+      </div>
+    </section>
+
+    <!-- 第二行：API 折算汇总金额卡 -->
+    <section class="tb-card tb-cost-card">
+      <div class="tb-card-head tb-cost-head">
+        <div class="tb-cost-title-wrap">
+          <span class="tb-card-title">💰 API 折算汇总金额</span>
+          <span id="tb-since-badge" class="tb-status-pill" data-tone="good">自安装起算 · 无回溯</span>
+        </div>
+        <div class="tb-seg-group">
+          <button id="tb-btn-scope-toggle" class="tb-seg-btn is-active" type="button">仅算新账 ✓</button>
+          <button id="tb-btn-ccy-toggle" class="tb-seg-btn" type="button">$ USD 主显</button>
+        </div>
+      </div>
+
+      <div class="tb-cost-grid">
+        <div class="tb-cost-cell">
+          <div class="tb-cost-lbl">今日汇总</div>
+          <div id="tb-cost-today-main" class="tb-cost-val">$0.00</div>
+          <div id="tb-cost-today-sub" class="tb-cost-sub">≈ ¥0.00</div>
+        </div>
+        <div class="tb-cost-cell">
+          <div class="tb-cost-lbl">本月汇总</div>
+          <div id="tb-cost-month-main" class="tb-cost-val">$0.00</div>
+          <div id="tb-cost-month-sub" class="tb-cost-sub">≈ ¥0.00 · 日均 $0.00</div>
+        </div>
+        <div class="tb-cost-cell">
+          <div class="tb-cost-lbl">累计总金额</div>
+          <div id="tb-cost-total-main" class="tb-cost-val tb-val-accent">$0.00</div>
+          <div id="tb-cost-total-sub" class="tb-cost-sub">≈ ¥0.00 · 0 天活跃</div>
+        </div>
+        <div class="tb-cost-cell">
+          <div class="tb-cost-lbl">缓存命中净省</div>
+          <div id="tb-cost-saved-main" class="tb-cost-val tb-val-emerald">$0.00</div>
+          <div id="tb-cost-saved-sub" class="tb-cost-sub">命中率 0.0% · 省 ¥0.00</div>
+        </div>
+      </div>
+
+      <div id="tb-cost-breakdown" class="tb-cost-foot">
+        今日费用拆分：未缓存输入 $0.00 · 缓存读取 $0.00 · 模型输出 $0.00
+      </div>
+    </section>
+
+    <!-- 第三行：4 周期 Token 用量卡片 -->
+    <section class="tb-period-grid">
+      <div class="tb-card tb-period-card">
+        <div class="tb-period-top"><span>累计处理 Token</span><span class="tb-period-tag">Total</span></div>
+        <div id="tb-tok-total-val" class="tb-period-val">0</div>
+        <div id="tb-tok-total-meta" class="tb-period-meta">0 Tokens</div>
+        <div id="tb-tok-total-cost" class="tb-period-sub">≈ $0.00 (¥0.00)</div>
+      </div>
+      <div class="tb-card tb-period-card">
+        <div class="tb-period-top"><span>今日使用</span><span class="tb-period-tag tb-tag-cyan">Today</span></div>
+        <div id="tb-tok-today-val" class="tb-period-val">0</div>
+        <div id="tb-tok-today-meta" class="tb-period-meta">0 会话实时累加</div>
+        <div id="tb-tok-today-cost" class="tb-period-sub">≈ $0.00 (¥0.00)</div>
+      </div>
+      <div class="tb-card tb-period-card">
+        <div class="tb-period-top"><span>本月使用</span><span class="tb-period-tag">Month</span></div>
+        <div id="tb-tok-month-val" class="tb-period-val">0</div>
+        <div id="tb-tok-month-meta" class="tb-period-meta">日均约 0</div>
+        <div id="tb-tok-month-cost" class="tb-period-sub">≈ $0.00 (¥0.00)</div>
+      </div>
+      <div class="tb-card tb-period-card">
+        <div class="tb-period-top"><span>年度使用</span><span class="tb-period-tag">Year</span></div>
+        <div id="tb-tok-year-val" class="tb-period-val">0</div>
+        <div id="tb-tok-year-meta" class="tb-period-meta">0 天活动记录</div>
+        <div id="tb-tok-year-cost" class="tb-period-sub">≈ $0.00 (¥0.00)</div>
+      </div>
+    </section>
+
+    <!-- 第四行：52 周 Token 活动热力图与模型构成 -->
+    <section class="tb-card tb-activity-card">
+      <div class="tb-activity-head">
+        <div class="tb-activity-left">
+          <span class="tb-card-title">Token 活动</span>
+          <span id="tb-first-date" class="tb-subtle-chip">首次记录：—</span>
+          <span id="tb-heat-hover-info" class="tb-heat-hover-info">悬停热力图方格可查看单日明细</span>
+        </div>
+        <div class="tb-seg-group">
+          <button id="tb-tab-heat" class="tb-seg-btn is-active" type="button">52 周热力图</button>
+          <button id="tb-tab-models" class="tb-seg-btn" type="button">模型账单构成</button>
+        </div>
+      </div>
+
+      <div id="tb-pane-heat" class="tb-heat-wrap">
+        <div id="tb-heat-months" class="tb-heat-months"></div>
+        <div id="tb-heat-grid" class="tb-heat-grid"></div>
+      </div>
+
+      <div id="tb-pane-models" class="tb-models-wrap" hidden>
+        <div id="tb-models-list" class="tb-models-list"></div>
+      </div>
+    </section>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>
