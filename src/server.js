@@ -15,8 +15,15 @@ const MIME_TYPES = {
   '.svg': 'image/svg+xml'
 };
 
+function applyCorsHeaders(res) {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+}
+
 function sendJson(res, code, payload) {
   const body = JSON.stringify(payload);
+  applyCorsHeaders(res);
   res.writeHead(code, {
     'Content-Type': 'application/json; charset=utf-8',
     'Cache-Control': 'no-store'
@@ -36,6 +43,13 @@ function startTokenBarServer(options = {}) {
     try {
       const urlObj = new URL(req.url || '/', `http://${host}`);
       const pathname = urlObj.pathname;
+
+      if (req.method === 'OPTIONS') {
+        applyCorsHeaders(res);
+        res.writeHead(204);
+        res.end();
+        return;
+      }
 
       if (pathname === '/healthz') {
         const addr = server.address();

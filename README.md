@@ -51,6 +51,14 @@ npm start
 
 浏览器访问 `http://127.0.0.1:19825/` 即可查看完整实时看板。
 
+### 方式三：Antigravity 页内看板（船板 `user/` 改装层）
+
+不启动 macOS 悬浮条时，可将看板嵌入客户端内嵌浏览器：
+
+1. 启动 `npm start`（或 `node src/server.js`）。
+2. 将 [`integrations/chuanban-page-ledger-board/`](integrations/chuanban-page-ledger-board/) 下的 `custom.js`、`custom.css` 复制到 `~/.gemini/antigravity/theme-patch/user/`。
+3. 详见该目录 [README](integrations/chuanban-page-ledger-board/README.md)。
+
 ## 运行测试
 
 ```bash
@@ -72,6 +80,8 @@ antigravity-token-bar/
 ├── scripts/
 │   ├── build-macos-app.sh  # 本地一键编译签名脚本
 │   └── start-macos-bar.sh  # 一键编译并拉起顶栏悬浮窗
+├── integrations/
+│   └── chuanban-page-ledger-board/  # 船板 theme-patch user 层页内看板（custom.js / custom.css）
 └── test/
     └── token-bar.test.js   # 计费精度、日志解析与安全合规单元测试
 ```
