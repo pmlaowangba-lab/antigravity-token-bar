@@ -65,6 +65,13 @@ npm start
 npm test
 ```
 
+## 跨机共享账本多端同步（Windows + MacBook + iMac）
+
+各台机器共用 Obsidian 知识库私仓 `laowang-obsidian` 下的 `04-素材工具/token-ledger/machines/<machineId>/<YYYY-MM>.json` 合并全量 Token 与费用：
+
+1. **每次出站同步前**：保持本机 `node src/server.js` 运行或请求一次 `http://127.0.0.1:19825/api/snapshot?fresh=1`，将本机最新分片导出到 vault `04-素材工具/token-ledger/machines/<machineId>/`；随知识库 `--sync-to-repo` + `git add -A` + `commit` + `push` 一并传到 GitHub。
+2. **每次入站拉取后**：在 `laowang-obsidian` 执行 `git pull --ff-only origin main` 与 `bootstrap_laowang_obsidian.py --sync-from-repo`（将其他机器分片落盘），再重启 `node src/server.js` 或请求一次 `http://127.0.0.1:19825/api/snapshot?fresh=1`，页面刷新后看板筛选栏即可看到 `全部机器 ▾` 并自动去重合并多机数据。
+
 ## 目录结构
 
 ```text

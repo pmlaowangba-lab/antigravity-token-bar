@@ -1134,11 +1134,14 @@
     }
     const fx = snap.fxCny || 7.2;
     const ledger = snap.fullLedger;
+    const preciseLedger = snap.preciseLedger;
     const heat = snap.fullHeatmap;
     const mainCcy = state.currency;
 
-    state.topCostToday = fmtMoney(ledger.today.cost.totalUSD, fx, mainCcy);
-    state.topCostTotal = fmtMoney(ledger.allTime.cost.totalUSD, fx, mainCcy);
+    const topTodayUSD = preciseLedger?.today?.cost?.totalUSD ?? ledger?.today?.cost?.totalUSD ?? 0;
+    const topAllUSD = preciseLedger?.allTime?.cost?.totalUSD ?? ledger?.allTime?.cost?.totalUSD ?? 0;
+    state.topCostToday = fmtMoney(topTodayUSD, fx, mainCcy);
+    state.topCostTotal = fmtMoney(topAllUSD, fx, mainCcy);
 
     if (refs.ccyBtn) {
       refs.ccyBtn.textContent = mainCcy === 'CNY' ? '¥ CNY 主显' : '$ USD 主显';
@@ -1152,7 +1155,6 @@
       refs.pinBtn.classList.toggle('is-active', pinned);
     }
 
-    const preciseLedger = snap.preciseLedger;
     if (refs.today) refs.today.innerHTML = renderTodayPanel(snap);
     refs.period.innerHTML = ['allTime', 'month', 'year']
       .map((key, i) => {
@@ -1238,9 +1240,6 @@
     }
     if (refs.ccyBtn) {
       refs.ccyBtn.textContent = state.currency === 'CNY' ? '¥ CNY 主显' : '$ USD 主显';
-    }
-    if (refs.dockCcyBtn) {
-      refs.dockCcyBtn.textContent = state.currency;
     }
     if (refs.pinBtn) {
       const pinned = Boolean(state.pinnedConvId);
