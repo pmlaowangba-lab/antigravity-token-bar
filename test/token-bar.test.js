@@ -322,22 +322,89 @@ test('6. 页内看板小弹窗（套件 3 · 暖金陶土工作室）：胶囊�
   assert.match(css, /\.ag-dock-top\s*\{[^}]*flex-wrap:\s*nowrap/i, '顶部胶囊第一行必须禁止换行');
   assert.match(css, /#ag-ledger-dock-quota\s*\{[^}]*flex-wrap:\s*nowrap/i, '顶部胶囊第二行必须禁止换行');
   assert.match(css, /--ag-ledger-hero-bg:/, '缺少套件 3 暖金陶土费用 Hero 渐变变量 --ag-ledger-hero-bg');
-  assert.match(css, /#ag-ledger-board\s*\{[^}]*width:\s*min\(840px/i, '看板应为 840px 级紧凑小弹窗');
+  assert.match(css, /#ag-ledger-board\s*\{[^}]*width:\s*min\(880px/i, '看板应为 880px 级舒展小弹窗');
   assert.match(css, /#ag-ledger-board\s*\{[^}]*overflow:\s*hidden/i, '小弹窗不应出现上下滚动条');
   assert.doesNotMatch(css, /#ag-ledger-board\s*\{[^}]*bottom:\s*16px/i, '不应再铺满全屏高度');
 
-  // 保持原始 5 层顺序 + 完整字段 + 交互控件（锁会话 / 热力图悬浮提示 / 模型构成条件显示切换）
+  // 保持原始 5 层顺序 + 完整字段 + 去拥挤行内额度条 + 交互控件（锁会话 / 刷新 / 热力图悬浮提示）
   const idxQuota = js.indexOf('id="ag-ledger-quota"');
   const idxSession = js.indexOf('id="ag-ledger-session-pair"');
   const idxToday = js.indexOf('id="ag-ledger-today"');
   const idxPeriod = js.indexOf('id="ag-ledger-period"');
   const idxActivity = js.indexOf('id="ag-ledger-activity"');
   assert.ok(idxQuota > 0 && idxQuota < idxSession && idxSession < idxToday && idxToday < idxPeriod && idxPeriod < idxActivity, '模块顺序必须严格保持：额度 → 会话/速度 → 今日折算 → 周期汇总 → 热力图');
-  assert.match(js, /5小时剩余[\s\S]*周额度剩余[\s\S]*5小时重置[\s\S]*周额度重置/, '额度卡 4 个字段必须完整保留');
+  assert.match(js, /ag-ledger-qbar-row/, '额度卡应使用去拥挤的行内一体进度条 .ag-ledger-qbar-row');
   assert.match(js, /缓存命中率/, '今日指标必须保留缓存命中率字段');
   assert.match(js, /ag-ledger-btn-pin/, '顶栏应提供自动跟随/锁定本路会话交互按钮');
+  assert.match(js, /ag-ledger-btn-refresh/, '顶栏应保留强制刷新按钮');
   assert.match(js, /ag-ledger-heat-tip/, '热力图应支持悬浮显示当日明细');
   assert.match(js, /ag-dock-ccy-btn/, '顶部胶囊应提供快捷币种切换按钮');
   assert.match(css, /\.ag-ledger-stack-bar\b/, '缺少 Token 堆叠占比条样式 .ag-ledger-stack-bar');
   assert.doesNotMatch(js, /⭐|⚡|💰/, '看板内应彻底移除 ⭐ / ⚡ / 💰 Emoji');
+});
+
+test('7. 方案 B 跨机共享账本（shared-ledger）：按机器×月份分片导出、多机去重合并、按机器筛选与脱敏校验', () => {
+  const shared = require('../src/shared-ledger');
+  const { aggregateUsage, preciseBuckets } = require('../src/sqlite-usage');
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'atb-shared-'));
+
+  try {
+    const ledgerDir = path.join(tmpDir, 'token-ledger');
+    // 1. 导出本机 windows 数据（包含 2 个月）
+    const winIndex = {
+      events: [
+        { date: '2026-10-28', convId: 'conv-1', model: 'Gemini 4 Carbon', workspace: '老王Win库', category: '主对话', input: 100000, thinking: 1000, output: 2000, cacheRead: 300000, estimated: false },
+        { date: '2026-11-19', convId: 'conv-2', model: 'Gemini 4 Neon', workspace: '老王Win库', category: '主对话', input: 200000, thinking: 2000, output: 4000, cacheRead: 400000, estimated: false },
+        { date: '2026-11-19', convId: 'conv-2', model: 'Gemini 4 Neon', workspace: '老王Win库', category: '主对话', input: 100000, thinking: 1000, output: 1000, cacheRead: 200000, estimated: false }
+      ],
+      scannedFiles: 2,
+      models: ['Gemini 4 Carbon', 'Gemini 4 Neon'],
+      workspaces: ['老王Win库'],
+      categories: ['主对话']
+    };
+    const exported = shared.exportLocalUsageToShared(winIndex, { ledgerDir, machineId: 'windows' });
+    assert.equal(exported.writtenFiles.length, 2, '应按月份拆分为 2026-10.json 和 2026-11.json');
+    const novFile = path.join(ledgerDir, 'machines', 'windows', '2026-11.json');
+    assert.ok(fs.existsSync(novFile), '缺少 machines/windows/2026-11.json');
+
+    // 幂等校验：数据不变时不应重复写盘
+    const exportedAgain = shared.exportLocalUsageToShared(winIndex, { ledgerDir, machineId: 'windows' });
+    assert.equal(exportedAgain.writtenFiles.length, 0, '数据未变化时应跳过写盘避免污染 Git');
+
+    // 2. 模拟另一台机器 macbook 同步过来的分片（含 1 条新对话 + 1 条同 conv-2 重复项测防重）
+    const macDir = path.join(ledgerDir, 'machines', 'macbook');
+    fs.mkdirSync(macDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(macDir, '2026-11.json'),
+      JSON.stringify({
+        version: 1,
+        machine: 'macbook',
+        month: '2026-11',
+        updatedAt: '2026-11-19T12:00:00.000Z',
+        rows: [
+          { date: '2026-11-19', convId: 'conv-mac-1', model: 'Claude 4.6 Opus', workspace: '老王本地库m3', category: '主对话', input: 500000, thinking: 5000, output: 10000, cacheRead: 1000000, responses: 5, estimatedResponses: 0 },
+          { date: '2026-11-19', convId: 'conv-2', model: 'Gemini 4 Neon', workspace: '老王Win库', category: '主对话', input: 50000, thinking: 500, output: 500, cacheRead: 100000, responses: 1, estimatedResponses: 0 }
+        ]
+      }, null, 2)
+    );
+
+    // 3. 合并本机 + 远端机器，验证总量、防重与按机器筛选
+    const merged = shared.loadMergedUsageIndex(winIndex, { ledgerDir, machineId: 'windows' });
+    assert.deepEqual(merged.machines, ['macbook', 'windows']);
+
+    const allToday = aggregateUsage(merged, { todayDate: '2026-11-19', range: 'today' });
+    // windows conv-2 (input 300k + think 3k + out 5k + cache 600k = 908k, 2 responses) + macbook conv-mac-1 (1515k, 5 responses)，重复 conv-2 不应叠加
+    assert.equal(allToday.totalTokens, 908000 + 1515000);
+    assert.equal(allToday.responses, 7);
+    assert.equal(allToday.sessions, 2);
+
+    const onlyMac = aggregateUsage(merged, { todayDate: '2026-11-19', range: 'today', machine: 'macbook' });
+    assert.equal(onlyMac.totalTokens, 1515000);
+    assert.equal(onlyMac.sessions, 1);
+
+    const buckets = preciseBuckets(merged, '2026-11-19');
+    assert.equal(buckets.cards.allTime.totalTokens, 403000 + 908000 + 1515000);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
 });

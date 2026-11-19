@@ -5,6 +5,7 @@ const os = require('node:os');
 const path = require('node:path');
 const pricing = require('./pricing-engine');
 const { loadUsageIndex, aggregateUsage, preciseBuckets } = require('./sqlite-usage');
+const sharedLedger = require('./shared-ledger');
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MODEL_CHANGE_REGEX = /Model Selection`?\s+(?:from\s+[^`]+?\s+)?to\s+`?([^.`<\n]+)`?/i;
@@ -503,8 +504,26 @@ function createLogScanner(options = {}) {
 
     const todayDate = pricing.formatLocalDate(new Date());
     const sinceLocalStr = pricing.formatLocalDate(new Date(sinceMs || Date.now()));
-    const usageIndex = conversationsDir ? loadUsageIndex(conversationsDir) : null;
-    const precise = usageIndex ? preciseBuckets(usageIndex, todayDate) : null;
+    const localUsageIndex = conversationsDir
+      ? loadUsageIndex(conversationsDir, { fresh: String(query.fresh || '') === '1' })
+      : null;
+
+    // 方案 B：自动将本机聚合结果幂等写入 vault 共享目录，并合并所有机器的分片
+    const sharedCfg = options.sharedLedgerDir !== undefined
+      ? { ledgerDir: options.sharedLedgerDir, machineId: options.machineId || 'local' }
+      : sharedLedger.detectVaultAndMachine();
+    let usageIndex = localUsageIndex;
+    if (sharedCfg.ledgerDir && localUsageIndex) {
+      try {
+        sharedLedger.exportLocalUsageToShared(localUsageIndex, sharedCfg);
+      } catch {
+        // 写入共享目录失败不影响看板展示
+      }
+      usageIndex = sharedLedger.loadMergedUsageIndex(localUsageIndex, sharedCfg);
+    }
+
+    const machineFilter = query.machine || '';
+    const precise = usageIndex ? preciseBuckets(usageIndex, todayDate, { machine: machineFilter }) : null;
 
     return {
       ok: true,
@@ -534,15 +553,19 @@ function createLogScanner(options = {}) {
             model: query.model || '',
             workspace: query.workspace || '',
             category: query.category || '',
+            machine: machineFilter,
             fxCny
           })
         : null,
       preciseOptions: usageIndex
         ? {
             dataDir: path.dirname(conversationsDir),
+            sharedDir: usageIndex.sharedDir || sharedCfg.ledgerDir || '',
+            localMachine: usageIndex.localMachine || sharedCfg.machineId || '',
             models: usageIndex.models,
             workspaces: usageIndex.workspaces,
-            categories: usageIndex.categories
+            categories: usageIndex.categories,
+            machines: usageIndex.machines || []
           }
         : null
     };

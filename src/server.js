@@ -64,7 +64,9 @@ function startTokenBarServer(options = {}) {
           grain: urlObj.searchParams.get('grain') || undefined,
           model: urlObj.searchParams.get('model') || undefined,
           workspace: urlObj.searchParams.get('workspace') || undefined,
-          category: urlObj.searchParams.get('category') || undefined
+          category: urlObj.searchParams.get('category') || undefined,
+          machine: urlObj.searchParams.get('machine') || undefined,
+          fresh: urlObj.searchParams.get('fresh') || undefined
         });
         if (pathname === '/summary-pill') {
           return sendJson(res, 200, {

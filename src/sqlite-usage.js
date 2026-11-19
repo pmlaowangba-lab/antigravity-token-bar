@@ -81,6 +81,16 @@ function readUsage(data) {
   };
 }
 
+function responseStepTimes(db) {
+  // gen_metadata.idx 和 steps.idx 不是同一套编号，不能按 idx 对齐。
+  // 模型回复是 step_type = 15，和 gen_metadata 按出现顺序一一对应。
+  const times = [];
+  for (const step of db.prepare('SELECT metadata FROM steps WHERE step_type = 15 ORDER BY idx ASC').all()) {
+    times.push(readStepCreatedSec(step.metadata));
+  }
+  return times;
+}
+
 function readStepCreatedSec(metadata) {
   if (!metadata) return 0;
   const top = parseProto(metadata);
@@ -161,16 +171,13 @@ function scanConversationUsage(conversationsDir, todayDate) {
     let db;
     try {
       db = new DatabaseSync(dbPath, { readOnly: true, timeout: 1500 });
-      const steps = db.prepare('SELECT idx, metadata FROM steps').all();
-      const times = new Map();
-      for (const step of steps) {
-        const sec = readStepCreatedSec(step.metadata);
-        if (sec) times.set(step.idx, sec);
-      }
-      const rows = db.prepare('SELECT idx, data FROM gen_metadata').all();
+      const times = responseStepTimes(db);
+      const rows = db.prepare('SELECT idx, data FROM gen_metadata ORDER BY idx ASC').all();
       let touchedToday = false;
-      for (const row of rows) {
-        const sec = times.get(row.idx) || 0;
+      const count = Math.min(times.length, rows.length);
+      for (let i = 0; i < count; i++) {
+        const row = rows[i];
+        const sec = times[i] || 0;
         if (!sec || localDateFromSec(sec) !== todayDate) continue;
         const usage = readUsage(row.data);
         if (!usage) continue;
@@ -280,11 +287,11 @@ function dirSignature(conversationsDir) {
 
 const indexCache = new Map();
 
-function loadUsageIndex(conversationsDir) {
+function loadUsageIndex(conversationsDir, options = {}) {
   if (!DatabaseSync || !conversationsDir || !fs.existsSync(conversationsDir)) return null;
   const sig = dirSignature(conversationsDir);
   const cached = indexCache.get(conversationsDir);
-  if (cached && cached.sig === sig) return cached.index;
+  if (!options.fresh && cached && cached.sig === sig) return cached.index;
 
   const workspaces = loadWorkspaces(conversationsDir);
   const events = [];
@@ -299,14 +306,13 @@ function loadUsageIndex(conversationsDir) {
     let db;
     try {
       db = new DatabaseSync(dbPath, { readOnly: true, timeout: 1500 });
-      const times = new Map();
-      for (const step of db.prepare('SELECT idx, metadata FROM steps').all()) {
-        const sec = readStepCreatedSec(step.metadata);
-        if (sec) times.set(step.idx, sec);
-      }
+      const times = responseStepTimes(db);
       const workspace = workspaces.get(convId) || '未标明';
-      for (const row of db.prepare('SELECT idx, data FROM gen_metadata').all()) {
-        const sec = times.get(row.idx) || 0;
+      const rows = db.prepare('SELECT idx, data FROM gen_metadata ORDER BY idx ASC').all();
+      const count = Math.min(times.length, rows.length);
+      for (let i = 0; i < count; i++) {
+        const row = rows[i];
+        const sec = times[i] || 0;
         if (!sec) continue;
         const usage = readUsage(row.data);
         if (!usage) continue;
@@ -385,6 +391,7 @@ function aggregateUsage(index, options = {}) {
   const model = options.model || '';
   const workspace = options.workspace || '';
   const category = options.category || '';
+  const machine = options.machine || '';
   const sessions = new Set();
   const days = new Map();
   const fxCny = Number(options.fxCny) > 0 ? Number(options.fxCny) : pricing.DEFAULT_FX_CNY;
@@ -403,15 +410,16 @@ function aggregateUsage(index, options = {}) {
     if (model && ev.model !== model) continue;
     if (workspace && ev.workspace !== workspace) continue;
     if (category && ev.category !== category) continue;
+    if (machine && ev.machine !== machine) continue;
     if (ev.estimated) {
-      estimatedResponses += 1;
+      estimatedResponses += Math.max(1, Number(ev.estimatedResponses) || 1);
       continue;
     }
     input += ev.input;
     thinking += ev.thinking;
     output += ev.output;
     cacheRead += ev.cacheRead;
-    responses += 1;
+    responses += Math.max(1, Number(ev.responses) || 1);
     const stepCost = pricing.calcStepCost(
       {
         inputTokens: ev.input,
@@ -470,15 +478,17 @@ function aggregateUsage(index, options = {}) {
   };
 }
 
-function preciseBuckets(index, todayDate) {
+function preciseBuckets(index, todayDate, options = {}) {
   const ranges = ['today', 'month', 'year', 'all'];
+  const machine = options.machine || '';
   const out = {};
   for (const range of ranges) {
-    out[range === 'all' ? 'allTime' : range] = aggregateUsage(index, { todayDate, range, grain: 'day' });
+    out[range === 'all' ? 'allTime' : range] = aggregateUsage(index, { todayDate, range, grain: 'day', machine });
   }
   const daily = {};
   for (const ev of index.events) {
     if (ev.estimated) continue;
+    if (machine && ev.machine !== machine) continue;
     let day = daily[ev.date];
     if (!day) {
       day = { input: 0, cache: 0, output: 0, steps: 0 };
@@ -487,7 +497,7 @@ function preciseBuckets(index, todayDate) {
     day.input += ev.input;
     day.cache += ev.cacheRead;
     day.output += ev.thinking + ev.output;
-    day.steps += 1;
+    day.steps += Math.max(1, Number(ev.responses) || 1);
   }
   return { cards: out, daily };
 }

@@ -28,7 +28,7 @@
     pinnedConvId: localStorage.getItem(LS_PIN) || '',
     activityTab: 'heat',
     activityScope: 'all',
-    filters: { range: 'today', grain: 'day', category: '', model: '', workspace: '' },
+    filters: { range: 'today', grain: 'day', category: '', model: '', workspace: '', machine: '' },
     snapshot: null,
     apiOk: false,
     topCostToday: '',
@@ -83,16 +83,18 @@
     const v = Math.max(0, Number(n) || 0);
     if (v === 512000 || v === 524288) return '512K';
     if (v === 1048576) return '1024K';
-    if (v >= 1e9) return `${(v / 1e9).toFixed(2)}B`;
+    if (v >= 1e8) return `${(v / 1e8).toFixed(2)}亿`;
     if (v >= 1e6) return `${(v / 1e6).toFixed(1)}M`;
     if (v >= 1e5) return `${Math.round(v / 1e3)}K`;
     if (v >= 1e3) return `${(v / 1e3).toFixed(1)}K`;
     return String(Math.round(v));
   }
 
-  /** 与精确合计同一套「万」显示：9842675 → 984.27万 */
+  /** 满 1 亿用「亿」（两位）；千万以下到一万用「万」。102150900 → 1.02亿，46259000 → 4625.90万 */
+  /** 超过一千万用亿（两位）。精确合计旁仍保留完整 token 数。 */
   function fmtWan(n, digits) {
     const v = Math.max(0, Number(n) || 0);
+    if (v >= 10000000) return `${(v / 100000000).toFixed(2)}亿`;
     if (v >= 10000) {
       const d = digits != null ? digits : (v >= 1000000 ? 2 : 1);
       return `${(v / 10000).toFixed(d)}万`;
@@ -402,6 +404,7 @@
           <div class="ag-ledger-actions">
             <button type="button" id="ag-ledger-btn-pin" class="ag-ledger-pill">自动跟随会话</button>
             <button type="button" id="ag-ledger-ccy" class="ag-ledger-pill">$ USD 主显</button>
+            <button type="button" id="ag-ledger-btn-refresh" class="ag-ledger-pill">刷新</button>
             <button type="button" id="ag-ledger-btn-close" class="ag-ledger-pill">收起 ×</button>
           </div>
         </div>
@@ -447,6 +450,7 @@
         if (t.id === 'ag-ledger-filter-category') state.filters.category = t.value;
         else if (t.id === 'ag-ledger-filter-model') state.filters.model = t.value;
         else if (t.id === 'ag-ledger-filter-workspace') state.filters.workspace = t.value;
+        else if (t.id === 'ag-ledger-filter-machine') state.filters.machine = t.value;
         else return;
         void refreshSnapshot();
       });
@@ -478,6 +482,11 @@
           }
           renderAll();
           void refreshSnapshot();
+        } else if (id === 'ag-ledger-btn-refresh') {
+          t.textContent = '刷新中';
+          void Promise.all([refreshSnapshot(true), refreshQuota(true)]).finally(() => {
+            if (t.isConnected) t.textContent = '刷新';
+          });
         } else if (id === 'ag-ledger-ccy') {
           state.currency = state.currency === 'USD' ? 'CNY' : 'USD';
           localStorage.setItem(LS_CCY, state.currency);
@@ -774,28 +783,28 @@
     const day = pickQuotaBucket(group, 'day');
     const h5Pct = quotaPct(h5);
     const weekPct = quotaPct(week);
+    const dayPct = quotaPct(day);
     const tight = [h5Pct, weekPct].filter((n) => n != null);
     const status = quotaStatus(tight.length ? Math.min.apply(null, tight) : null);
-    const h5Time = quotaRemainText(h5 && h5.resetTime) || '—';
-    const weekTime = quotaRemainText(week && week.resetTime) || '—';
-    const footParts = [];
-    if (day) footParts.push(`日剩余 ${quotaPctText(day)}，${quotaRemainText(day.resetTime) || '—'}后重置`);
-    if (h5) footParts.push(`5小时剩余 ${quotaPctText(h5)}，${h5Time}后重置`);
-    if (week) footParts.push(`周剩余 ${quotaPctText(week)}，${weekTime}后重置`);
+    const h5Time = quotaRemainShort(h5 && h5.resetTime) || '—';
+    const weekTime = quotaRemainShort(week && week.resetTime) || '—';
+    const rowHtml = (label, pct, timeText) =>
+      `<div class="ag-ledger-qbar-row">` +
+      `<span class="ag-ledger-qbar-lbl">${label}</span>` +
+      `${quotaBarHtml(pct)}` +
+      `<b class="ag-ledger-qbar-pct" data-tone="${quotaColorTone(pct)}">${pct == null ? '—' : `${pct}%`}</b>` +
+      `<span class="ag-ledger-qbar-time">${esc(timeText)}后重置</span>` +
+      `</div>`;
+    const rows = [];
+    if (day) rows.push(rowHtml('日额度', dayPct, quotaRemainShort(day.resetTime) || '—'));
+    rows.push(rowHtml('5小时', h5Pct, h5Time));
+    rows.push(rowHtml('周额度', weekPct, weekTime));
     return `<div class="ag-ledger-card">
       <div class="ag-ledger-card-head">
         <span>${esc(shortQuotaName(group.displayName))} 额度</span>
         <span class="ag-ledger-badge" data-tone="${status.tone}">${status.label}</span>
       </div>
-      <div class="ag-ledger-progress-row"><span>5小时</span>${quotaBarHtml(h5Pct)}</div>
-      <div class="ag-ledger-progress-row"><span>周额度</span>${quotaBarHtml(weekPct)}</div>
-      <div class="ag-ledger-mini-grid">
-        <div><div class="ag-ledger-mini-lbl">5小时剩余</div><div class="ag-ledger-mini-val" data-tone="${quotaColorTone(h5Pct)}">${esc(quotaPctText(h5))}</div></div>
-        <div><div class="ag-ledger-mini-lbl">周额度剩余</div><div class="ag-ledger-mini-val" data-tone="${quotaColorTone(weekPct)}">${esc(quotaPctText(week))}</div></div>
-        <div><div class="ag-ledger-mini-lbl">5小时重置</div><div class="ag-ledger-mini-val">${esc(h5Time)}</div></div>
-        <div><div class="ag-ledger-mini-lbl">周额度重置</div><div class="ag-ledger-mini-val">${esc(weekTime)}</div></div>
-      </div>
-      <div class="ag-ledger-foot">${esc(footParts.join(' · '))}</div>
+      <div class="ag-ledger-qbar-list">${rows.join('')}</div>
     </div>`;
   }
 
@@ -1100,6 +1109,7 @@
       <div class="ag-ledger-filters">
         <div class="ag-ledger-seg">${filterButtons('range', [['today', '今日'], ['7d', '近7日'], ['month', '本月'], ['year', '年度'], ['all', '累计']])}</div>
         <div class="ag-ledger-filter-selects">
+          ${Array.isArray(options.machines) && options.machines.length > 0 ? filterSelect('ag-ledger-filter-machine', options.machines, state.filters.machine, '全部机器') : ''}
           ${filterSelect('ag-ledger-filter-category', options.categories, state.filters.category, '全部会话')}
           ${filterSelect('ag-ledger-filter-model', options.models, state.filters.model, '全部模型')}
           ${filterSelect('ag-ledger-filter-workspace', options.workspaces, state.filters.workspace, '全部工作区')}
@@ -1125,12 +1135,6 @@
         </div>
       </div>
       <div class="ag-ledger-stack-bar">${segs.join('')}</div>
-      <div class="ag-ledger-stack-legend">
-        <span><i data-k="in"></i>输入 ${pct(day.inputTokens)}%</span>
-        <span><i data-k="think"></i>思考 ${pct(day.thinkingTokens)}%</span>
-        <span><i data-k="out"></i>输出 ${pct(day.outputTokens)}%</span>
-        <span><i data-k="cache"></i>缓存 ${pct(day.cacheReadTokens)}%</span>
-      </div>
       <div class="ag-ledger-today-metrics">
         <div class="ag-ledger-today-metric" data-k="in"><div class="ag-ledger-metric-head"><span class="ag-ledger-swatch" data-k="in"></span>输入</div><b>${fmtWan(day.inputTokens, 1)}</b><small>${pct(day.inputTokens)}% · ${fmtExact(day.inputTokens)}</small></div>
         <div class="ag-ledger-today-metric" data-k="think"><div class="ag-ledger-metric-head"><span class="ag-ledger-swatch" data-k="think"></span>思考</div><b>${fmtWan(day.thinkingTokens, 1)}</b><small>${pct(day.thinkingTokens)}% · ${fmtExact(day.thinkingTokens)}</small></div>
@@ -1193,12 +1197,14 @@
         const split = raw.thinkingTokens != null;
         return `
           <div class="ag-ledger-card">
-            <div class="ag-ledger-card-head"><span>${labels[i]}精确合计</span><span class="ag-ledger-badge">${labels[i]}</span></div>
-            <div class="ag-ledger-period-val">${fmtWan(total)}</div>
+            <div class="ag-ledger-card-head"><span>${labels[i]}精确合计</span><span class="ag-ledger-badge">${bucket.sessionsCount} 会话 · ${bucket.steps} 轮</span></div>
+            <div class="ag-ledger-period-val-row">
+              <div class="ag-ledger-period-val">${fmtWan(total)}</div>
+              <span class="ag-ledger-period-exact">${fmtExact(total)}</span>
+            </div>
             <div class="ag-ledger-period-lines">
-              <div>${fmtExact(total)} tokens</div>
-              <div>输入 ${fmtWan(bucket.inputTokens, 1)} · ${pct(bucket.inputTokens)}% · ${split ? `思考 ${fmtWan(bucket.thinkingTokens, 1)} · 输出 ${fmtWan(bucket.outputTokens, 1)}` : `输出含思考 ${fmtWan(bucket.outputTokens, 1)}`}</div>
-              <div>缓存 ${fmtWan(bucket.cacheTokens, 1)} · 会话 ${bucket.sessionsCount} · 响应 ${bucket.steps}</div>
+              <div>输入 ${fmtWan(bucket.inputTokens, 1)} (${pct(bucket.inputTokens)}%) · ${split ? `思考 ${fmtWan(bucket.thinkingTokens, 1)} · 输出 ${fmtWan(bucket.outputTokens, 1)}` : `输出含思考 ${fmtWan(bucket.outputTokens, 1)}`}</div>
+              <div>缓存 ${fmtWan(bucket.cacheTokens, 1)}</div>
             </div>
           </div>`;
       })
@@ -1252,6 +1258,20 @@
     ensureShell();
     const metrics = window.__ag_last_metrics || null;
     const live = parseLiveMetrics(metrics);
+    if (refs.connChip) {
+      refs.connChip.textContent = state.apiOk ? '127.0.0.1:19825 已连接' : '本地账本离线';
+    }
+    if (refs.ccyBtn) {
+      refs.ccyBtn.textContent = state.currency === 'CNY' ? '¥ CNY 主显' : '$ USD 主显';
+    }
+    if (refs.dockCcyBtn) {
+      refs.dockCcyBtn.textContent = state.currency;
+    }
+    if (refs.pinBtn) {
+      const pinned = Boolean(state.pinnedConvId);
+      refs.pinBtn.textContent = pinned ? '已锁定本路' : '自动跟随会话';
+      refs.pinBtn.classList.toggle('is-active', pinned);
+    }
     if (refs.offline) {
       if (!state.apiOk) {
         refs.offline.hidden = false;
@@ -1268,7 +1288,7 @@
     fitBoard();
   }
 
-  async function refreshSnapshot() {
+  async function refreshSnapshot(fresh) {
     const convId = state.pinnedConvId || readFocusedPillPayload()?.cascadeId || extractCascadeId();
     const params = new URLSearchParams();
     if (convId) params.set('convId', convId);
@@ -1278,6 +1298,8 @@
     if (filters.category) params.set('category', filters.category);
     if (filters.model) params.set('model', filters.model);
     if (filters.workspace) params.set('workspace', filters.workspace);
+    if (filters.machine) params.set('machine', filters.machine);
+    if (fresh) params.set('fresh', '1');
     const qs = `?${params.toString()}`;
     const keepBoardOpen = state.boardOpen;
     try {
