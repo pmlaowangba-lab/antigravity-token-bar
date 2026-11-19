@@ -269,22 +269,15 @@
 
   function applyDockGeometry() {
     if (!dockEl) return;
-    const reserve = nativeCaptionReserve();
-    const measured = measureTopRightChromeInset();
-    const rightPx = reserve
-      ? Math.max(reserve, measured)
-      : Math.max(8, measured - DOCK_NUDGE_RIGHT_PX);
-    dockEl.style.setProperty('--ag-ledger-dock-right', `${Math.round(rightPx)}px`);
     dockEl.style.setProperty('--ag-ledger-dock-top', `${DOCK_TOP_PX}px`);
   }
 
   function buildDockCostHtml(todayText, totalText) {
     if (!todayText && !totalText) {
-      return '<span class="ag-dock-cost-lbl">费用</span><span class="ag-dock-cost-main">—</span>';
+      return '<span class="ag-dock-cost-main">—</span>';
     }
-    const main = esc(todayText || '—');
-    const total = totalText ? `<span class="ag-dock-cost-total">/ ${esc(totalText)}</span>` : '';
-    return `<span class="ag-dock-cost-lbl">费用</span><span class="ag-dock-cost-main">${main}</span>${total}`;
+    const main = esc(todayText || totalText || '—');
+    return `<span class="ag-dock-cost-main">${main}</span>`;
   }
 
   function buildDockMetricsHtml(metrics, live) {
@@ -297,7 +290,6 @@
     }
     const tpsTone = tps == null ? 'muted' : (live?.speed?.tone || 'good');
     let used = live && live.contextUsedLabel && live.contextUsedLabel !== '—' ? live.contextUsedLabel : '';
-    let limit = live?.contextLimitLabel || '';
     let pct = Number.isFinite(live?.usedPercent) ? live.usedPercent : null;
     if (!used && metrics?.inlineHtml) {
       const ctxProbe = document.createElement('span');
@@ -305,7 +297,6 @@
       const ctxM = (ctxProbe.textContent || '').match(/Ctx\s+([^/]+)\/([^\s(]+)\s*\((\d+)%\)/i);
       if (ctxM) {
         used = ctxM[1].trim();
-        limit = ctxM[2].trim();
         pct = Number(ctxM[3]);
       }
     }
@@ -314,16 +305,14 @@
     const ctxHtml = used
       ? `<span class="ag-dock-vsep" aria-hidden="true"></span>` +
         `<span class="ag-dock-ctx">` +
-        `<span class="ag-dock-muted">Ctx</span>` +
-        `<span class="ag-dock-ctx-track"><span class="ag-dock-ctx-fill" data-tone="${ctxTone}" style="width:${ctxPct}%"></span></span>` +
-        `<span class="ag-dock-ctx-num" data-tone="${ctxTone}">${esc(used)}/${esc(limit || '512K')} (${ctxPct}%)</span>` +
+        `<span class="ag-dock-ctx-num" data-tone="${ctxTone}">${esc(used)}·${ctxPct}%</span>` +
         `</span>`
       : '';
     return (
       `<span class="ag-dock-speed">` +
       `<span class="ag-dock-dot" data-tone="${esc(tpsTone)}"></span>` +
       `<span class="ag-dock-val">${tps != null ? esc(String(tps)) : '—'}</span>` +
-      `<span class="ag-dock-muted">tok/s</span>` +
+      `<span class="ag-dock-muted">t/s</span>` +
       `</span>` +
       ctxHtml
     );
@@ -333,11 +322,11 @@
     const snap = state.snapshot;
     const sess = snap?.activeSession;
     const usd = sess?.sessionTotals?.todayUSD;
-    if (!sess || usd == null) return '本路今日 —';
+    if (!sess || usd == null) return '路—';
     const focusedCid = String(readFocusedPillPayload()?.cascadeId || '').trim().toLowerCase();
     const selected = String(snap.selectedConvId || sess.conversationId || '').trim().toLowerCase();
-    if (focusedCid && selected && focusedCid !== selected) return '本路今日 —';
-    return `本路今日 ${fmtMoney(usd, snap.fxCny || 7.2, state.currency)}`;
+    if (focusedCid && selected && focusedCid !== selected) return '路—';
+    return `路${fmtMoney(usd, snap.fxCny || 7.2, state.currency)}`;
   }
 
   function hideCoreMetricsTooltip() {
@@ -360,7 +349,6 @@
     backdropEl?.setAttribute('data-open', open ? '1' : '0');
     boardEl?.setAttribute('data-open', open ? '1' : '0');
     dockEl?.setAttribute('data-board-open', open ? '1' : '0');
-    if (refs.dockToggleBtn) refs.dockToggleBtn.textContent = open ? '▲' : '▼';
     document.documentElement.classList.toggle('ag-ledger-panel-open', open);
     if (open) {
       applyBoardAnchor();
@@ -510,36 +498,19 @@
       dockCostEl.innerHTML = buildDockCostHtml(state.topCostToday, state.topCostTotal);
       dockSessionEl = document.createElement('span');
       dockSessionEl.id = 'ag-ledger-dock-session';
-      dockSessionEl.textContent = '本路今日 —';
-      const dockCcyBtn = document.createElement('button');
-      dockCcyBtn.type = 'button';
-      dockCcyBtn.id = 'ag-dock-ccy-btn';
-      dockCcyBtn.className = 'ag-dock-chip-btn';
-      dockCcyBtn.title = '一键切换 USD / CNY';
-      dockCcyBtn.textContent = state.currency;
-      refs.dockCcyBtn = dockCcyBtn;
-      const dockToggleBtn = document.createElement('button');
-      dockToggleBtn.type = 'button';
-      dockToggleBtn.id = 'ag-dock-toggle-btn';
-      dockToggleBtn.className = 'ag-dock-chip-btn';
-      dockToggleBtn.title = '展开 / 收起看板';
-      dockToggleBtn.textContent = state.boardOpen ? '▲' : '▼';
-      refs.dockToggleBtn = dockToggleBtn;
-      topRow.append(dockMetricsEl, dockCostEl, dockSessionEl, dockCcyBtn, dockToggleBtn);
-      dockQuotaEl = document.createElement('div');
+      dockSessionEl.textContent = '路—';
+      dockQuotaEl = document.createElement('span');
       dockQuotaEl.id = 'ag-ledger-dock-quota';
-      dockQuotaEl.innerHTML = '<span class="ag-dock-qgroup"><span class="ag-dock-muted">额度读取中…</span></span>';
-      dockEl.append(topRow, dockQuotaEl);
+      dockQuotaEl.innerHTML = '<span class="ag-dock-qgroup"><span class="ag-dock-muted">额度…</span></span>';
+      const sep1 = document.createElement('span');
+      sep1.className = 'ag-dock-vsep';
+      sep1.setAttribute('aria-hidden', 'true');
+      const sep2 = document.createElement('span');
+      sep2.className = 'ag-dock-vsep';
+      sep2.setAttribute('aria-hidden', 'true');
+      topRow.append(dockMetricsEl, sep1, dockCostEl, dockSessionEl, sep2, dockQuotaEl);
+      dockEl.append(topRow);
       document.body.appendChild(dockEl);
-
-      dockCcyBtn.addEventListener('pointerdown', (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        if (typeof e.stopImmediatePropagation === 'function') e.stopImmediatePropagation();
-        state.currency = state.currency === 'USD' ? 'CNY' : 'USD';
-        localStorage.setItem(LS_CCY, state.currency);
-        renderAll();
-      }, true);
 
       const toggleBoardFromDock = (e) => {
         if (e) {
@@ -561,7 +532,6 @@
       };
       dockEl.addEventListener('pointerdown', (e) => {
         if (e.button !== 0) return;
-        if (e.target instanceof Element && e.target.closest('#ag-dock-ccy-btn')) return;
         toggleBoardFromDock(e);
       }, true);
       dockEl.addEventListener('click', (e) => {
@@ -714,7 +684,17 @@
   }
 
   function quotaRemainShort(resetTime) {
-    return quotaRemainText(resetTime).replace('即将重置', '即将').replace(/小时/g, '时');
+    const sec = Number(resetTime && resetTime.seconds != null ? resetTime.seconds : NaN);
+    if (!Number.isFinite(sec)) return '';
+    const ms = sec * 1000 - Date.now();
+    if (ms <= 60000) return '<1m';
+    const mins = Math.floor(ms / 60000);
+    const days = Math.floor(mins / 1440);
+    const hours = Math.floor((mins % 1440) / 60);
+    const m = mins % 60;
+    if (days > 0) return hours > 0 ? `${days}d${hours}h` : `${days}d`;
+    if (hours > 0) return m > 0 ? `${hours}h${m}m` : `${hours}h`;
+    return `${m}m`;
   }
 
   function pickQuotaBucket(group, kind) {
@@ -728,9 +708,9 @@
     return null;
   }
 
-  function shortQuotaName(name) {
+  function shortQuotaName(name, compact) {
     const text = String(name || '');
-    if (/gemini/i.test(text)) return 'Gemini';
+    if (/gemini/i.test(text)) return compact ? 'Gem' : 'Gemini';
     if (/claude|gpt/i.test(text)) return 'Claude/GPT';
     return text.replace(/\s*models?$/i, '') || '额度';
   }
@@ -830,7 +810,7 @@
     const joined = items.join('<span class="ag-dock-muted">·</span>');
     return (
       `<span class="ag-dock-qgroup">` +
-      `<span class="ag-dock-qname">${esc(shortQuotaName(group.displayName))}</span>` +
+      `<span class="ag-dock-qname">${esc(shortQuotaName(group.displayName, true))}</span>` +
       `<span class="ag-dock-qbadge" data-tone="${esc(groupTone)}">${dotHtml}${joined || '<span class="ag-dock-muted">—</span>'}</span>` +
       `</span>`
     );
@@ -838,8 +818,9 @@
 
   function renderQuota() {
     const groups = quotaState.groups || [];
-    const dockHtml = groups.length
-      ? `<div class="ag-dock-qrow">${groups.map(quotaDockGroupHtml).join('')}</div>`
+    const dockGroups = groups.filter((g) => !/claude|gpt/i.test(String((g && g.displayName) || '')));
+    const dockHtml = dockGroups.length
+      ? `<span class="ag-dock-qrow">${dockGroups.map(quotaDockGroupHtml).join('')}</span>`
       : `<span class="ag-dock-qgroup"><span class="ag-dock-muted">${esc(quotaState.error || '5h — · 周 —')}</span></span>`;
     const boardHtml = groups.length
       ? groups.map(quotaCard).join('')
@@ -1157,12 +1138,6 @@
 
     if (refs.ccyBtn) {
       refs.ccyBtn.textContent = mainCcy === 'CNY' ? '¥ CNY 主显' : '$ USD 主显';
-    }
-    if (refs.dockCcyBtn) {
-      refs.dockCcyBtn.textContent = mainCcy;
-    }
-    if (refs.dockToggleBtn) {
-      refs.dockToggleBtn.textContent = state.boardOpen ? '▲' : '▼';
     }
     if (refs.connChip) {
       refs.connChip.textContent = state.apiOk ? '127.0.0.1:19825 已连接' : '本地账本离线';
