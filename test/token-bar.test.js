@@ -284,3 +284,60 @@ test('3. HTTP 服务与纯手写前端 UI 正常响应：单一大面板集成�
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });
+
+test('5. 船板页内停靠条（方案 A · 极简线性微条）：去硬棕框与钱袋 Emoji、结构化进度条、明暗双主题与配额语义分组', () => {
+  const dir = path.resolve(__dirname, '../integrations/chuanban-page-ledger-board');
+  const css = fs.readFileSync(path.join(dir, 'custom.css'), 'utf8');
+  const js = fs.readFileSync(path.join(dir, 'custom.js'), 'utf8');
+
+  // JS 语法合法
+  assert.doesNotThrow(() => new Function(js), 'custom.js 存在语法错误');
+
+  // CSS：方案 A 明暗主题变量与去扁平粗黑覆盖
+  assert.match(css, /--ag-dock-bg:/, 'custom.css 应定义方案 A 停靠条背景变量 --ag-dock-bg');
+  assert.match(css, /--ag-dock-track:/, 'custom.css 应定义方案 A 进度条底槽变量 --ag-dock-track');
+  assert.doesNotMatch(css, /border:\s*1\.5px\s+solid\s+#9f4a2c/i, '应移除旧版硬棕边框');
+  assert.doesNotMatch(css, /#ag-ledger-dock\s*\*\s*\{[^}]*color:\s*#111111\s*!important/i, '应移除全黑强制覆盖以建立视觉层级');
+  assert.match(css, /\.ag-dock-top\b/, '缺少第一行容器 .ag-dock-top');
+  assert.match(css, /\.ag-dock-ctx-track\b/, '缺少上下文迷你进度条 .ag-dock-ctx-track');
+  assert.match(css, /\.ag-dock-ctx-fill\s*\{[^}]*display:\s*block/i, '进度条填充 .ag-dock-ctx-fill（span）必须声明 display: block 否则宽度不生效');
+  assert.match(css, /\.ag-dock-qgroup\b/, '缺少配额独立分组 .ag-dock-qgroup');
+
+  // JS：停靠条去钱袋 Emoji，改用结构化 DOM（速度圆点 + 费用主次 + 配额分组）
+  assert.doesNotMatch(js, /topCostLabel:\s*['"]💰/, '停靠条初始费用文案不应再使用钱袋 Emoji');
+  assert.doesNotMatch(js, /state\.topCostLabel\s*=\s*`💰/, '停靠条费用文案不应再拼接钱袋 Emoji');
+  assert.match(js, /ag-dock-speed/, '停靠条指标区应渲染结构化速度节点');
+  assert.match(js, /ag-dock-qgroup/, '停靠条配额区应按模型组渲染独立分组节点');
+  assert.match(js, /data-tone=/, '停靠条配额与上下文应输出语义 data-tone');
+});
+
+test('6. 页内看板小弹窗（套件 3 · 暖金陶土工作室）：胶囊两行不换行、全功能交互、原始 5 层顺序与暖陶色系', () => {
+  const dir = path.resolve(__dirname, '../integrations/chuanban-page-ledger-board');
+  const css = fs.readFileSync(path.join(dir, 'custom.css'), 'utf8');
+  const js = fs.readFileSync(path.join(dir, 'custom.js'), 'utf8');
+
+  assert.doesNotThrow(() => new Function(js), 'custom.js 存在语法错误');
+
+  // 顶部胶囊严格两行不换行 + 暖陶色系与 Hero 横幅变量
+  assert.match(css, /\.ag-dock-top\s*\{[^}]*flex-wrap:\s*nowrap/i, '顶部胶囊第一行必须禁止换行');
+  assert.match(css, /#ag-ledger-dock-quota\s*\{[^}]*flex-wrap:\s*nowrap/i, '顶部胶囊第二行必须禁止换行');
+  assert.match(css, /--ag-ledger-hero-bg:/, '缺少套件 3 暖金陶土费用 Hero 渐变变量 --ag-ledger-hero-bg');
+  assert.match(css, /#ag-ledger-board\s*\{[^}]*width:\s*min\(840px/i, '看板应为 840px 级紧凑小弹窗');
+  assert.match(css, /#ag-ledger-board\s*\{[^}]*overflow:\s*hidden/i, '小弹窗不应出现上下滚动条');
+  assert.doesNotMatch(css, /#ag-ledger-board\s*\{[^}]*bottom:\s*16px/i, '不应再铺满全屏高度');
+
+  // 保持原始 5 层顺序 + 完整字段 + 交互控件（锁会话 / 热力图悬浮提示 / 模型构成条件显示切换）
+  const idxQuota = js.indexOf('id="ag-ledger-quota"');
+  const idxSession = js.indexOf('id="ag-ledger-session-pair"');
+  const idxToday = js.indexOf('id="ag-ledger-today"');
+  const idxPeriod = js.indexOf('id="ag-ledger-period"');
+  const idxActivity = js.indexOf('id="ag-ledger-activity"');
+  assert.ok(idxQuota > 0 && idxQuota < idxSession && idxSession < idxToday && idxToday < idxPeriod && idxPeriod < idxActivity, '模块顺序必须严格保持：额度 → 会话/速度 → 今日折算 → 周期汇总 → 热力图');
+  assert.match(js, /5小时剩余[\s\S]*周额度剩余[\s\S]*5小时重置[\s\S]*周额度重置/, '额度卡 4 个字段必须完整保留');
+  assert.match(js, /缓存命中率/, '今日指标必须保留缓存命中率字段');
+  assert.match(js, /ag-ledger-btn-pin/, '顶栏应提供自动跟随/锁定本路会话交互按钮');
+  assert.match(js, /ag-ledger-heat-tip/, '热力图应支持悬浮显示当日明细');
+  assert.match(js, /ag-dock-ccy-btn/, '顶部胶囊应提供快捷币种切换按钮');
+  assert.match(css, /\.ag-ledger-stack-bar\b/, '缺少 Token 堆叠占比条样式 .ag-ledger-stack-bar');
+  assert.doesNotMatch(js, /⭐|⚡|💰/, '看板内应彻底移除 ⭐ / ⚡ / 💰 Emoji');
+});

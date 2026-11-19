@@ -4,6 +4,14 @@
  * 账本汇总走本机 127.0.0.1:19825（antigravity-token-bar API，非悬浮窗进程）
  */
 (function agLedgerPageBoard() {
+  if (typeof window.__agLedgerCleanup === 'function') {
+    try { window.__agLedgerCleanup(); } catch (e) {}
+  }
+  document.querySelectorAll('#ag-ledger-dock, #ag-ledger-board, #ag-ledger-backdrop').forEach((el) => {
+    el.classList.add('ag-ledger-stale');
+    el.remove();
+  });
+
   const API_BASE = 'http://127.0.0.1:19825';
   const LS_CCY = 'ag_ledger_ccy';
   const LS_FRESH = 'ag_ledger_only_fresh';
@@ -19,15 +27,54 @@
     currency: localStorage.getItem(LS_CCY) === 'CNY' ? 'CNY' : 'USD',
     pinnedConvId: localStorage.getItem(LS_PIN) || '',
     activityTab: 'heat',
+    activityScope: 'all',
+    filters: { range: 'today', grain: 'day', category: '', model: '', workspace: '' },
     snapshot: null,
     apiOk: false,
-    topCostLabel: '💰 —'
+    topCostToday: '',
+    topCostTotal: ''
   };
 
+  const CASCADE_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+  function takeCascadeId(value) {
+    const id = String(value || '').trim().toLowerCase();
+    return CASCADE_UUID_RE.test(id) ? id : '';
+  }
+
+  /** 与补丁内核同一套会话识别：新窗口的 id 可能在 query、watched 或侧栏，不只在 /c/ 路径里 */
   function extractCascadeId() {
     try {
-      const m = window.location.pathname.match(/\/c\/([0-9a-f-]{36})/i);
-      if (m) return m[1];
+      const watched = takeCascadeId(window.__ag_watched_cascade_id);
+      if (watched) return watched;
+      const sp = new URLSearchParams(window.location.search || '');
+      const focused = takeCascadeId(sp.get('focused'));
+      if (focused) return focused;
+      const fromQuery = takeCascadeId(sp.get('cascadeId'));
+      if (fromQuery) return fromQuery;
+      let path = String(window.location.pathname || '');
+      try {
+        path = decodeURIComponent(path);
+      } catch (e) {}
+      const m = path.match(/\/c\/([^/?#]+)/i);
+      if (m) {
+        const first = takeCascadeId(String(m[1]).split(/\+|%2b/i)[0]);
+        if (first) return first;
+      }
+      const selected = document.querySelector(
+        '[data-testid="conversation-row-sidebar"][data-selected="true"], [data-testid=conversation-row-sidebar][data-selected=true]'
+      );
+      if (selected) {
+        const fromRow = takeCascadeId(selected.getAttribute('data-cascade-id'));
+        if (fromRow) return fromRow;
+      }
+      const pill = document.getElementById('ag-live-metrics-pill');
+      if (pill) {
+        const fromPill = takeCascadeId(
+          pill.getAttribute('data-ag-cascade-id') || pill.getAttribute('data-ag-rendered-cid')
+        );
+        if (fromPill) return fromPill;
+      }
     } catch (e) {}
     return '';
   }
@@ -41,6 +88,20 @@
     if (v >= 1e5) return `${Math.round(v / 1e3)}K`;
     if (v >= 1e3) return `${(v / 1e3).toFixed(1)}K`;
     return String(Math.round(v));
+  }
+
+  /** 与精确合计同一套「万」显示：9842675 → 984.27万 */
+  function fmtWan(n, digits) {
+    const v = Math.max(0, Number(n) || 0);
+    if (v >= 10000) {
+      const d = digits != null ? digits : (v >= 1000000 ? 2 : 1);
+      return `${(v / 10000).toFixed(d)}万`;
+    }
+    return Math.round(v).toLocaleString('en-US');
+  }
+
+  function fmtExact(n) {
+    return Math.round(Math.max(0, Number(n) || 0)).toLocaleString('en-US');
   }
 
   function fmtMoney(usd, fx, ccy) {
@@ -148,7 +209,6 @@
       sessionCacheRate: sessCacheM ? Number(sessCacheM[1]) : 0,
       healthTone,
       healthLabel,
-      healthNote: `✓ 当前上下文占用 ${usedPct}%（与底部指标胶囊同源实时推送）。`,
       speed: {
         tokensPerSec: tps,
         ttftSec: ttftM ? Number(ttftM[1] || ttftM[2]) : holdM ? Number(holdM[1]) : null,
@@ -164,13 +224,27 @@
     };
   }
 
-  let boardEl, backdropEl, dockEl, dockMetricsEl, dockCostEl;
+  let boardEl, backdropEl, dockEl, dockMetricsEl, dockCostEl, dockSessionEl, dockQuotaEl;
+  let lastRequestedConv = '';
+  let quotaService = null;
+  let quotaState = { at: 0, groups: null, error: '' };
+  let quotaSig = '';
   const refs = {};
 
   const DOCK_TOP_PX = 10;
   const DOCK_BAND_PX = 56;
-  /** 在避让标题栏按钮后，再向右贴一些（减小 right 偏移） */
+  /** macOS 红绿灯在左侧，避让页内按钮后再向右贴一些 */
   const DOCK_NUDGE_RIGHT_PX = 28;
+  /** Windows 最小化/最大化/关闭是系统按钮，不在 DOM 里，固定让出宽度 */
+  const WIN_CAPTION_RESERVE_PX = 176;
+
+  function nativeCaptionReserve() {
+    try {
+      const hint = `${navigator.platform || ''} ${navigator.userAgent || ''}`;
+      if (/Windows|Win32|Win64/i.test(hint)) return WIN_CAPTION_RESERVE_PX;
+    } catch (e) {}
+    return 0;
+  }
 
   function measureTopRightChromeInset() {
     let insetRight = 16;
@@ -195,36 +269,75 @@
 
   function applyDockGeometry() {
     if (!dockEl) return;
-    const rightPx = Math.max(8, measureTopRightChromeInset() - DOCK_NUDGE_RIGHT_PX);
+    const reserve = nativeCaptionReserve();
+    const measured = measureTopRightChromeInset();
+    const rightPx = reserve
+      ? Math.max(reserve, measured)
+      : Math.max(8, measured - DOCK_NUDGE_RIGHT_PX);
     dockEl.style.setProperty('--ag-ledger-dock-right', `${Math.round(rightPx)}px`);
     dockEl.style.setProperty('--ag-ledger-dock-top', `${DOCK_TOP_PX}px`);
   }
 
+  function buildDockCostHtml(todayText, totalText) {
+    if (!todayText && !totalText) {
+      return '<span class="ag-dock-cost-lbl">费用</span><span class="ag-dock-cost-main">—</span>';
+    }
+    const main = esc(todayText || '—');
+    const total = totalText ? `<span class="ag-dock-cost-total">/ ${esc(totalText)}</span>` : '';
+    return `<span class="ag-dock-cost-lbl">费用</span><span class="ag-dock-cost-main">${main}</span>${total}`;
+  }
+
   function buildDockMetricsHtml(metrics, live) {
-    if (!metrics?.inlineHtml && !live) return '';
     let tps = live?.speed?.tokensPerSec ?? null;
-    let pct = live?.usedPercent ?? 0;
-    let ctxUsed = live?.contextUsedLabel || '';
-    let ctxLimit = live?.contextLimitLabel || '512k';
-    if (metrics?.inlineHtml) {
+    if (tps == null && metrics?.inlineHtml) {
       const probe = document.createElement('span');
       probe.innerHTML = metrics.inlineHtml;
-      const txt = probe.textContent || '';
-      const tpsM = txt.match(/([0-9]+)\s*tok\/s/i);
-      const ctxM = txt.match(/Ctx\s+([^/]+)\/([^\s(]+)\s*\((\d+)%\)/i);
-      if (tps == null && tpsM) tps = Number(tpsM[1]);
+      const tpsM = (probe.textContent || '').match(/([0-9]+(?:\.[0-9]+)?)\s*tok\/s/i);
+      if (tpsM) tps = Math.round(Number(tpsM[1]));
+    }
+    const tpsTone = tps == null ? 'muted' : (live?.speed?.tone || 'good');
+    let used = live && live.contextUsedLabel && live.contextUsedLabel !== '—' ? live.contextUsedLabel : '';
+    let limit = live?.contextLimitLabel || '';
+    let pct = Number.isFinite(live?.usedPercent) ? live.usedPercent : null;
+    if (!used && metrics?.inlineHtml) {
+      const ctxProbe = document.createElement('span');
+      ctxProbe.innerHTML = metrics.inlineHtml;
+      const ctxM = (ctxProbe.textContent || '').match(/Ctx\s+([^/]+)\/([^\s(]+)\s*\((\d+)%\)/i);
       if (ctxM) {
-        if (!ctxUsed) ctxUsed = ctxM[1].trim();
-        ctxLimit = ctxM[2].trim();
-        if (!live?.usedPercent) pct = Number(ctxM[3]);
+        used = ctxM[1].trim();
+        limit = ctxM[2].trim();
+        pct = Number(ctxM[3]);
       }
     }
-    const ctxClass = pct >= 90 ? 'ag-ctx-crit' : pct >= 75 ? 'ag-ctx-warn' : 'ag-ctx-ok';
-    const tpsTxt = tps != null ? `${tps} tok/s` : '— tok/s';
-    const ctxInner = ctxUsed
-      ? `Ctx ${ctxUsed}/${ctxLimit} <span class="${ctxClass}">(${Math.round(pct)}%)</span>`
-      : `Ctx <span class="${ctxClass}">(${Math.round(pct)}%)</span>`;
-    return `<span>${tpsTxt}</span><span class="ag-sep">·</span><span>${ctxInner}</span>`;
+    const ctxPct = pct == null ? 0 : Math.max(0, Math.min(100, Math.round(pct)));
+    const ctxTone = ctxPct >= 88 ? 'danger' : ctxPct >= 72 ? 'warn' : 'good';
+    const ctxHtml = used
+      ? `<span class="ag-dock-vsep" aria-hidden="true"></span>` +
+        `<span class="ag-dock-ctx">` +
+        `<span class="ag-dock-muted">Ctx</span>` +
+        `<span class="ag-dock-ctx-track"><span class="ag-dock-ctx-fill" data-tone="${ctxTone}" style="width:${ctxPct}%"></span></span>` +
+        `<span class="ag-dock-ctx-num" data-tone="${ctxTone}">${esc(used)}/${esc(limit || '512K')} (${ctxPct}%)</span>` +
+        `</span>`
+      : '';
+    return (
+      `<span class="ag-dock-speed">` +
+      `<span class="ag-dock-dot" data-tone="${esc(tpsTone)}"></span>` +
+      `<span class="ag-dock-val">${tps != null ? esc(String(tps)) : '—'}</span>` +
+      `<span class="ag-dock-muted">tok/s</span>` +
+      `</span>` +
+      ctxHtml
+    );
+  }
+
+  function sessionCostText() {
+    const snap = state.snapshot;
+    const sess = snap?.activeSession;
+    const usd = sess?.sessionTotals?.todayUSD;
+    if (!sess || usd == null) return '本路今日 —';
+    const focusedCid = String(readFocusedPillPayload()?.cascadeId || '').trim().toLowerCase();
+    const selected = String(snap.selectedConvId || sess.conversationId || '').trim().toLowerCase();
+    if (focusedCid && selected && focusedCid !== selected) return '本路今日 —';
+    return `本路今日 ${fmtMoney(usd, snap.fxCny || 7.2, state.currency)}`;
   }
 
   function hideCoreMetricsTooltip() {
@@ -247,13 +360,14 @@
     backdropEl?.setAttribute('data-open', open ? '1' : '0');
     boardEl?.setAttribute('data-open', open ? '1' : '0');
     dockEl?.setAttribute('data-board-open', open ? '1' : '0');
+    if (refs.dockToggleBtn) refs.dockToggleBtn.textContent = open ? '▲' : '▼';
     document.documentElement.classList.toggle('ag-ledger-panel-open', open);
     if (open) {
       applyBoardAnchor();
       hideCoreMetricsTooltip();
       if (document.body && backdropEl && boardEl) {
-        document.body.appendChild(backdropEl);
-        document.body.appendChild(boardEl);
+        if (!backdropEl.isConnected) document.body.appendChild(backdropEl);
+        if (!boardEl.isConnected) document.body.appendChild(boardEl);
       }
     }
   }
@@ -280,59 +394,105 @@
       boardEl.setAttribute('aria-label', 'API 折算与 Token 账本看板');
       boardEl.innerHTML = `
         <div class="ag-ledger-hdr">
-          <div class="ag-ledger-title">本机已记录用量 · 页内看板</div>
+          <div class="ag-ledger-title-wrap">
+            <span class="ag-ledger-live-dot" aria-hidden="true"></span>
+            <div class="ag-ledger-title">本机用量与折算控制台</div>
+            <span id="ag-ledger-conn-chip" class="ag-ledger-status-chip">连接中…</span>
+          </div>
           <div class="ag-ledger-actions">
-            <button type="button" id="ag-ledger-btn-reset" class="ag-ledger-pill">重置新账起点</button>
+            <button type="button" id="ag-ledger-btn-pin" class="ag-ledger-pill">自动跟随会话</button>
+            <button type="button" id="ag-ledger-ccy" class="ag-ledger-pill">$ USD 主显</button>
             <button type="button" id="ag-ledger-btn-close" class="ag-ledger-pill">收起 ×</button>
           </div>
         </div>
-        <div id="ag-ledger-offline" class="ag-ledger-offline" hidden></div>
-        <section class="ag-ledger-grid-2" id="ag-ledger-session-pair"></section>
-        <section class="ag-ledger-card" id="ag-ledger-cost-section"></section>
-        <section class="ag-ledger-period-grid" id="ag-ledger-period"></section>
-        <section class="ag-ledger-card" id="ag-ledger-activity"></section>
+        <div class="ag-ledger-fit">
+          <section id="ag-ledger-quota" class="ag-ledger-grid-2"></section>
+          <div id="ag-ledger-offline" class="ag-ledger-offline" hidden></div>
+          <section id="ag-ledger-session-pair" class="ag-ledger-grid-2"></section>
+          <section class="ag-ledger-card" id="ag-ledger-today"></section>
+          <section class="ag-ledger-period-grid" id="ag-ledger-period"></section>
+          <section class="ag-ledger-card" id="ag-ledger-activity"></section>
+        </div>
       `;
       document.body.appendChild(boardEl);
 
+      refs.connChip = boardEl.querySelector('#ag-ledger-conn-chip');
+      refs.pinBtn = boardEl.querySelector('#ag-ledger-btn-pin');
+      refs.ccyBtn = boardEl.querySelector('#ag-ledger-ccy');
+      refs.quota = boardEl.querySelector('#ag-ledger-quota');
       refs.offline = boardEl.querySelector('#ag-ledger-offline');
       refs.sessionPair = boardEl.querySelector('#ag-ledger-session-pair');
       refs.costSection = boardEl.querySelector('#ag-ledger-cost-section');
       refs.period = boardEl.querySelector('#ag-ledger-period');
+      refs.today = boardEl.querySelector('#ag-ledger-today');
       refs.activity = boardEl.querySelector('#ag-ledger-activity');
 
       boardEl.querySelector('#ag-ledger-btn-close').addEventListener('click', () => setBoardOpen(false));
-      boardEl.querySelector('#ag-ledger-btn-reset').addEventListener('click', async () => {
-        try {
-          const res = await fetch(`${API_BASE}/api/reset-baseline`, { method: 'POST' });
-          if (res.ok) {
-            const json = await res.json();
-            state.onlyFresh = true;
-            localStorage.setItem(LS_FRESH, '1');
-            state.snapshot = json.snapshot || null;
-            renderAll();
-          }
-        } catch (e) {}
+      boardEl.addEventListener('mouseover', (ev) => {
+        const cell = ev.target instanceof Element ? ev.target.closest('.ag-ledger-heat-cell') : null;
+        if (!cell) return;
+        const tip = boardEl.querySelector('#ag-ledger-heat-tip');
+        const info = cell.getAttribute('title') || '';
+        if (tip && info) tip.textContent = info;
       });
-      boardEl.addEventListener('click', (ev) => {
+      boardEl.addEventListener('mouseout', (ev) => {
+        const cell = ev.target instanceof Element ? ev.target.closest('.ag-ledger-heat-cell') : null;
+        if (!cell) return;
+        const tip = boardEl.querySelector('#ag-ledger-heat-tip');
+        if (tip) tip.textContent = '鼠标移到格子可查看当日明细';
+      });
+      boardEl.addEventListener('change', (ev) => {
         const t = ev.target;
         if (!(t instanceof HTMLElement)) return;
+        if (t.id === 'ag-ledger-filter-category') state.filters.category = t.value;
+        else if (t.id === 'ag-ledger-filter-model') state.filters.model = t.value;
+        else if (t.id === 'ag-ledger-filter-workspace') state.filters.workspace = t.value;
+        else return;
+        void refreshSnapshot();
+      });
+      boardEl.addEventListener('click', (ev) => {
+        const origin = ev.target instanceof Element ? ev.target : ev.target?.parentElement || null;
+        if (!origin) return;
+        const filterBtn = origin.closest('[data-filter]');
+        if (filterBtn && boardEl.contains(filterBtn)) {
+          const filterKey = filterBtn.getAttribute('data-filter');
+          if (filterKey === 'range' || filterKey === 'grain') {
+            state.filters[filterKey] = filterBtn.getAttribute('data-value') || '';
+            void refreshSnapshot();
+          }
+          return;
+        }
+        const t = origin instanceof HTMLElement ? origin : origin.closest('button');
+        if (!(t instanceof HTMLElement)) return;
         const id = t.id;
-        if (id === 'ag-ledger-scope') {
-          state.onlyFresh = !state.onlyFresh;
-          localStorage.setItem(LS_FRESH, state.onlyFresh ? '1' : '0');
+        if (id === 'ag-ledger-btn-pin') {
+          if (state.pinnedConvId) {
+            state.pinnedConvId = '';
+            localStorage.removeItem(LS_PIN);
+          } else {
+            const curCid = readFocusedPillPayload()?.cascadeId || extractCascadeId() || state.snapshot?.activeSession?.conversationId || '';
+            if (curCid) {
+              state.pinnedConvId = curCid;
+              localStorage.setItem(LS_PIN, curCid);
+            }
+          }
           renderAll();
+          void refreshSnapshot();
         } else if (id === 'ag-ledger-ccy') {
           state.currency = state.currency === 'USD' ? 'CNY' : 'USD';
           localStorage.setItem(LS_CCY, state.currency);
           renderAll();
         } else if (id === 'ag-ledger-tab-heat') {
-          refs.activity.querySelector('#ag-ledger-pane-heat').hidden = false;
-          refs.activity.querySelector('#ag-ledger-pane-models').hidden = true;
+          state.activityTab = 'heat';
+          renderAll();
         } else if (id === 'ag-ledger-tab-models') {
-          refs.activity.querySelector('#ag-ledger-pane-heat').hidden = true;
-          refs.activity.querySelector('#ag-ledger-pane-models').hidden = false;
+          state.activityTab = 'models';
+          renderAll();
+        } else if (id === 'ag-ledger-scope-current' || id === 'ag-ledger-scope-all') {
+          state.activityScope = id === 'ag-ledger-scope-current' ? 'current' : 'all';
+          renderAll();
         }
-      });
+      }, true);
     }
     if (!dockEl) {
       dockEl = document.createElement('div');
@@ -341,17 +501,47 @@
       dockEl.setAttribute('tabindex', '0');
       dockEl.setAttribute('aria-label', '会话指标与 API 折算，点击查看完整账本看板');
       dockEl.title = '点击任意位置打开完整账本看板 · 右键切换 USD/CNY';
+      const topRow = document.createElement('div');
+      topRow.className = 'ag-dock-top';
       dockMetricsEl = document.createElement('span');
       dockMetricsEl.id = 'ag-ledger-dock-metrics';
-      const vsep = document.createElement('span');
-      vsep.id = 'ag-ledger-dock-vsep';
-      vsep.setAttribute('aria-hidden', 'true');
       dockCostEl = document.createElement('span');
       dockCostEl.id = 'ag-ledger-dock-cost';
-      dockEl.append(dockMetricsEl, vsep, dockCostEl);
+      dockCostEl.innerHTML = buildDockCostHtml(state.topCostToday, state.topCostTotal);
+      dockSessionEl = document.createElement('span');
+      dockSessionEl.id = 'ag-ledger-dock-session';
+      dockSessionEl.textContent = '本路今日 —';
+      const dockCcyBtn = document.createElement('button');
+      dockCcyBtn.type = 'button';
+      dockCcyBtn.id = 'ag-dock-ccy-btn';
+      dockCcyBtn.className = 'ag-dock-chip-btn';
+      dockCcyBtn.title = '一键切换 USD / CNY';
+      dockCcyBtn.textContent = state.currency;
+      refs.dockCcyBtn = dockCcyBtn;
+      const dockToggleBtn = document.createElement('button');
+      dockToggleBtn.type = 'button';
+      dockToggleBtn.id = 'ag-dock-toggle-btn';
+      dockToggleBtn.className = 'ag-dock-chip-btn';
+      dockToggleBtn.title = '展开 / 收起看板';
+      dockToggleBtn.textContent = state.boardOpen ? '▲' : '▼';
+      refs.dockToggleBtn = dockToggleBtn;
+      topRow.append(dockMetricsEl, dockCostEl, dockSessionEl, dockCcyBtn, dockToggleBtn);
+      dockQuotaEl = document.createElement('div');
+      dockQuotaEl.id = 'ag-ledger-dock-quota';
+      dockQuotaEl.innerHTML = '<span class="ag-dock-qgroup"><span class="ag-dock-muted">额度读取中…</span></span>';
+      dockEl.append(topRow, dockQuotaEl);
       document.body.appendChild(dockEl);
 
-      const openBoardFromDock = (e) => {
+      dockCcyBtn.addEventListener('pointerdown', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (typeof e.stopImmediatePropagation === 'function') e.stopImmediatePropagation();
+        state.currency = state.currency === 'USD' ? 'CNY' : 'USD';
+        localStorage.setItem(LS_CCY, state.currency);
+        renderAll();
+      }, true);
+
+      const toggleBoardFromDock = (e) => {
         if (e) {
           e.preventDefault();
           e.stopPropagation();
@@ -359,21 +549,27 @@
         }
         hideCoreMetricsTooltip();
         ensureShell();
+        if (state.boardOpen) {
+          setBoardOpen(false);
+          return;
+        }
         suppressBackdropCloseUntil = performance.now() + 480;
         setBoardOpen(true);
         renderAll();
         void refreshSnapshot();
+        void refreshQuota(true);
       };
       dockEl.addEventListener('pointerdown', (e) => {
         if (e.button !== 0) return;
-        openBoardFromDock(e);
+        if (e.target instanceof Element && e.target.closest('#ag-dock-ccy-btn')) return;
+        toggleBoardFromDock(e);
       }, true);
       dockEl.addEventListener('click', (e) => {
         e.preventDefault();
         e.stopPropagation();
       }, true);
       dockEl.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter' || e.key === ' ') openBoardFromDock(e);
+        if (e.key === 'Enter' || e.key === ' ') toggleBoardFromDock(e);
       });
       dockEl.addEventListener('contextmenu', (e) => {
         e.preventDefault();
@@ -395,23 +591,332 @@
     syncBoardDom();
   }
 
-  function syncDock(metrics, costLabel, live) {
-    if (!dockEl || !dockMetricsEl || !dockCostEl) return;
-    applyDockGeometry();
-    const cid = extractCascadeId();
-    const visible =
-      Boolean(cid) && metrics && metrics.hasData && metrics.cascadeId === cid && metrics.inlineHtml;
-    if (!visible) {
-      dockEl.style.display = 'none';
-      hideCoreMetricsTooltip();
+  const INPUT_BOX_ID = 'antigravity.agentSidePanelInputBox';
+  let lastFocusedBox = null;
+
+  function allInputBoxes() {
+    return Array.from(document.querySelectorAll('[id="' + INPUT_BOX_ID + '"]'));
+  }
+
+  function boxFromNode(node) {
+    if (!node || typeof node.closest !== 'function') return null;
+    const boxes = allInputBoxes();
+    for (const box of boxes) {
+      if (box === node || box.contains(node)) return box;
+    }
+    const pane = node.closest(
+      '[data-pane-id], [data-testid="conversation-view"], [data-testid="side-question-tab-content"], [data-media-drop-scope="subpane"]'
+    );
+    if (!pane) return null;
+    for (const box of boxes) {
+      if (pane.contains(box)) return box;
+    }
+    return null;
+  }
+
+  /** 船板口径：当前正在用的那路输入框，而不是窗口主会话 */
+  function activeInputBox() {
+    const boxes = allInputBoxes();
+    if (boxes.length === 0) return null;
+    const fromActive = boxFromNode(document.activeElement);
+    if (fromActive) {
+      lastFocusedBox = fromActive;
+      return fromActive;
+    }
+    const focusedPanes = boxes.filter((box) => !(box.closest && box.closest('[data-pane-unfocused]')));
+    if (focusedPanes.length === 1) {
+      lastFocusedBox = focusedPanes[0];
+      return focusedPanes[0];
+    }
+    if (lastFocusedBox && lastFocusedBox.isConnected && boxes.includes(lastFocusedBox)) return lastFocusedBox;
+    return focusedPanes[0] || boxes[0];
+  }
+
+  function readPillElement(pill) {
+    if (!pill || pill.style.display === 'none') return null;
+    const textEl = pill.querySelector('[data-ag-metrics-text="1"], .ag-live-metrics-text, #ag-live-metrics-text');
+    const inlineHtml = textEl ? textEl.innerHTML : '';
+    const text = ((textEl ? textEl.textContent : pill.textContent) || '').trim();
+    if (!text || !inlineHtml) return null;
+    return {
+      hasData: true,
+      inlineHtml,
+      cascadeId: String(pill.getAttribute('data-ag-rendered-cid') || pill.getAttribute('data-ag-cascade-id') || '').trim(),
+      tooltipHtml: ''
+    };
+  }
+
+  function readFocusedPillPayload() {
+    const box = activeInputBox();
+    if (box) {
+      const pill = box.querySelector('[data-ag-metrics-pill="1"], .ag-live-metrics-pill, #ag-live-metrics-pill');
+      return readPillElement(pill);
+    }
+    return readPillElement(document.getElementById('ag-live-metrics-pill'));
+  }
+
+  function findQuotaService() {
+    if (quotaService) return quotaService;
+    const root = document.getElementById('root');
+    if (!root) return null;
+    const key = Object.keys(root).find((k) => k.indexOf('__reactContainer') === 0);
+    if (!key || !root[key]) return null;
+    const seen = new Set();
+    const consider = (obj, depth) => {
+      if (!obj || typeof obj !== 'object' || depth > 6 || quotaService) return;
+      if (typeof obj.retrieveUserQuotaSummary === 'function') {
+        quotaService = obj;
+        return;
+      }
+      try {
+        if (obj.cloudCodeService) consider(obj.cloudCodeService, depth + 1);
+      } catch (e) {}
+      try {
+        if (obj.core && obj.core !== obj) consider(obj.core, depth + 1);
+      } catch (e) {}
+      try {
+        if (obj.value && obj.value !== obj) consider(obj.value, depth + 1);
+      } catch (e) {}
+    };
+    const walk = (node, depth) => {
+      if (!node || typeof node !== 'object' || depth > 8000 || seen.has(node) || quotaService) return;
+      seen.add(node);
+      try { consider(node.memoizedProps, 0); } catch (e) {}
+      try { consider(node.memoizedState, 0); } catch (e) {}
+      walk(node.child, depth + 1);
+      walk(node.sibling, depth + 1);
+    };
+    walk(root[key], 0);
+    return quotaService;
+  }
+
+  function quotaPct(bucket) {
+    const raw = bucket && bucket.remaining && bucket.remaining.case === 'remainingFraction'
+      ? bucket.remaining.value
+      : null;
+    const n = Number(raw);
+    if (!Number.isFinite(n)) return null;
+    return Math.max(0, Math.min(100, Math.round(n * 100)));
+  }
+
+  function quotaRemainText(resetTime) {
+    const sec = Number(resetTime && resetTime.seconds != null ? resetTime.seconds : NaN);
+    if (!Number.isFinite(sec)) return '';
+    const ms = sec * 1000 - Date.now();
+    if (ms <= 60000) return '即将重置';
+    const mins = Math.floor(ms / 60000);
+    const days = Math.floor(mins / 1440);
+    const hours = Math.floor((mins % 1440) / 60);
+    const m = mins % 60;
+    if (days > 0) return hours > 0 ? `${days}天${hours}小时` : `${days}天`;
+    if (hours > 0) return m > 0 ? `${hours}小时${m}分` : `${hours}小时`;
+    return `${m}分`;
+  }
+
+  function quotaRemainShort(resetTime) {
+    return quotaRemainText(resetTime).replace('即将重置', '即将').replace(/小时/g, '时');
+  }
+
+  function pickQuotaBucket(group, kind) {
+    const buckets = (group && group.buckets) || [];
+    for (const bucket of buckets) {
+      const windowName = String(bucket.window || '').trim().toLowerCase();
+      if (kind === 'day' && windowName === 'daily') return bucket;
+      if (kind === 'week' && windowName === 'weekly') return bucket;
+      if (kind === 'h5' && (windowName === '5h' || windowName === '5-hour' || windowName === 'five-hour')) return bucket;
+    }
+    return null;
+  }
+
+  function shortQuotaName(name) {
+    const text = String(name || '');
+    if (/gemini/i.test(text)) return 'Gemini';
+    if (/claude|gpt/i.test(text)) return 'Claude/GPT';
+    return text.replace(/\s*models?$/i, '') || '额度';
+  }
+
+  function asQuotaPercent(n) {
+    if (n == null || !Number.isFinite(n)) return null;
+    if (n > 0 && n <= 1) return Math.round(n * 100);
+    return Math.round(n);
+  }
+
+  function quotaStatus(pct) {
+    const percent = asQuotaPercent(pct);
+    if (percent == null) return { tone: 'muted', label: '—' };
+    if (percent < 10) return { tone: 'danger', label: '紧张' };
+    if (percent < 25) return { tone: 'warn', label: '偏低' };
+    return { tone: 'good', label: '正常' };
+  }
+
+  function quotaColorTone(pct) {
+    const percent = asQuotaPercent(pct);
+    if (percent == null) return 'muted';
+    if (percent < 40) return 'danger';
+    if (percent < 70) return 'warn';
+    return 'good';
+  }
+
+  function quotaBarHtml(pct) {
+    const tone = quotaColorTone(pct);
+    const width = pct == null ? 0 : pct;
+    return `<div class="ag-ledger-progress"><div data-tone="${tone}" style="width:${width}%"></div></div>`;
+  }
+
+  function quotaPctText(bucket) {
+    const pct = quotaPct(bucket);
+    return pct == null ? '—' : `${pct}%`;
+  }
+
+  function quotaCard(group) {
+    const h5 = pickQuotaBucket(group, 'h5');
+    const week = pickQuotaBucket(group, 'week');
+    const day = pickQuotaBucket(group, 'day');
+    const h5Pct = quotaPct(h5);
+    const weekPct = quotaPct(week);
+    const tight = [h5Pct, weekPct].filter((n) => n != null);
+    const status = quotaStatus(tight.length ? Math.min.apply(null, tight) : null);
+    const h5Time = quotaRemainText(h5 && h5.resetTime) || '—';
+    const weekTime = quotaRemainText(week && week.resetTime) || '—';
+    const footParts = [];
+    if (day) footParts.push(`日剩余 ${quotaPctText(day)}，${quotaRemainText(day.resetTime) || '—'}后重置`);
+    if (h5) footParts.push(`5小时剩余 ${quotaPctText(h5)}，${h5Time}后重置`);
+    if (week) footParts.push(`周剩余 ${quotaPctText(week)}，${weekTime}后重置`);
+    return `<div class="ag-ledger-card">
+      <div class="ag-ledger-card-head">
+        <span>${esc(shortQuotaName(group.displayName))} 额度</span>
+        <span class="ag-ledger-badge" data-tone="${status.tone}">${status.label}</span>
+      </div>
+      <div class="ag-ledger-progress-row"><span>5小时</span>${quotaBarHtml(h5Pct)}</div>
+      <div class="ag-ledger-progress-row"><span>周额度</span>${quotaBarHtml(weekPct)}</div>
+      <div class="ag-ledger-mini-grid">
+        <div><div class="ag-ledger-mini-lbl">5小时剩余</div><div class="ag-ledger-mini-val" data-tone="${quotaColorTone(h5Pct)}">${esc(quotaPctText(h5))}</div></div>
+        <div><div class="ag-ledger-mini-lbl">周额度剩余</div><div class="ag-ledger-mini-val" data-tone="${quotaColorTone(weekPct)}">${esc(quotaPctText(week))}</div></div>
+        <div><div class="ag-ledger-mini-lbl">5小时重置</div><div class="ag-ledger-mini-val">${esc(h5Time)}</div></div>
+        <div><div class="ag-ledger-mini-lbl">周额度重置</div><div class="ag-ledger-mini-val">${esc(weekTime)}</div></div>
+      </div>
+      <div class="ag-ledger-foot">${esc(footParts.join(' · '))}</div>
+    </div>`;
+  }
+
+  function quotaDockGroupHtml(group) {
+    const items = [];
+    const day = pickQuotaBucket(group, 'day');
+    const h5 = pickQuotaBucket(group, 'h5');
+    const week = pickQuotaBucket(group, 'week');
+    const pcts = [];
+    const pushItem = (label, bucket) => {
+      if (!bucket) return;
+      const pct = quotaPct(bucket);
+      if (pct != null) pcts.push(pct);
+      const tone = quotaColorTone(pct);
+      const remain = label === '日' ? '' : quotaRemainShort(bucket.resetTime);
+      items.push(
+        `<span class="ag-dock-muted">${esc(label)}</span>` +
+        `<span class="ag-dock-qval" data-tone="${esc(tone)}">${pct == null ? '—' : `${pct}%`}</span>` +
+        (remain ? `<span class="ag-dock-qtime">${esc(remain)}</span>` : '')
+      );
+    };
+    pushItem('日', day);
+    pushItem('5h', h5);
+    pushItem('周', week);
+
+    const minPct = pcts.length ? Math.min.apply(null, pcts) : null;
+    const groupTone = quotaStatus(minPct).tone;
+    const dotHtml =
+      groupTone === 'danger' || groupTone === 'warn'
+        ? `<span class="ag-dock-dot" data-tone="${esc(groupTone)}"></span>`
+        : '';
+    const joined = items.join('<span class="ag-dock-muted">·</span>');
+    return (
+      `<span class="ag-dock-qgroup">` +
+      `<span class="ag-dock-qname">${esc(shortQuotaName(group.displayName))}</span>` +
+      `<span class="ag-dock-qbadge" data-tone="${esc(groupTone)}">${dotHtml}${joined || '<span class="ag-dock-muted">—</span>'}</span>` +
+      `</span>`
+    );
+  }
+
+  function renderQuota() {
+    const groups = quotaState.groups || [];
+    const dockHtml = groups.length
+      ? `<div class="ag-dock-qrow">${groups.map(quotaDockGroupHtml).join('')}</div>`
+      : `<span class="ag-dock-qgroup"><span class="ag-dock-muted">${esc(quotaState.error || '5h — · 周 —')}</span></span>`;
+    const boardHtml = groups.length
+      ? groups.map(quotaCard).join('')
+      : `<div class="ag-ledger-card"><div class="ag-ledger-card-head"><span>额度剩余</span><span class="ag-ledger-badge" data-tone="muted">—</span></div><div class="ag-ledger-foot">${esc(quotaState.error || '额度读取中')}</div></div>`;
+    const sig = `${dockHtml}\n${boardHtml}`;
+    if (sig === quotaSig) return;
+    quotaSig = sig;
+    if (dockQuotaEl && dockQuotaEl.innerHTML !== dockHtml) dockQuotaEl.innerHTML = dockHtml;
+    if (refs.quota && refs.quota.innerHTML !== boardHtml) refs.quota.innerHTML = boardHtml;
+  }
+
+  async function refreshQuota(force) {
+    const now = Date.now();
+    if (!force && quotaState.groups && quotaState.at && now - quotaState.at < 45000) return;
+    const svc = findQuotaService();
+    if (!svc) {
+      renderQuota();
       return;
     }
+    try {
+      const raw = await svc.retrieveUserQuotaSummary(true);
+      const groups = (raw && raw.response && raw.response.groups) || [];
+      quotaState = { at: Date.now(), groups, error: groups.length ? '' : '暂无额度信息' };
+    } catch (e) {
+      quotaService = null;
+      if (!quotaState.groups) quotaState = { at: Date.now(), groups: null, error: '额度读取失败' };
+    }
+    renderQuota();
+  }
+
+  function syncDock(metrics, live) {
+    if (cancelled) return;
+    renderQuota();
+    if (!dockEl || !dockMetricsEl || !dockCostEl) return;
+    applyDockGeometry();
+    const focused = readFocusedPillPayload();
+    const focusedCid = String(focused?.cascadeId || '').trim().toLowerCase();
+    const metricsCid = String(metrics?.cascadeId || '').trim().toLowerCase();
+    const source =
+      focused &&
+      metrics &&
+      metrics.hasData &&
+      metrics.inlineHtml &&
+      metricsCid &&
+      focusedCid &&
+      metricsCid === focusedCid
+        ? metrics
+        : focused;
+    const onChat =
+      (location.pathname || '').indexOf('/c/') !== -1 || !!document.querySelector('[id="antigravity.agentSidePanelInputBox"]');
+    const costHtml = buildDockCostHtml(state.topCostToday, state.topCostTotal);
+    const sessionText = sessionCostText();
+    const focusedNow = String(focused?.cascadeId || '').trim();
+    if (focusedNow && focusedNow !== lastRequestedConv) {
+      lastRequestedConv = focusedNow;
+      void refreshSnapshot();
+    }
+    if (dockSessionEl && dockSessionEl.textContent !== sessionText) dockSessionEl.textContent = sessionText;
+    if (!source || !source.inlineHtml) {
+      if (!onChat) {
+        dockEl.style.display = 'none';
+        hideCoreMetricsTooltip();
+        return;
+      }
+      if (document.body) document.body.appendChild(dockEl);
+      const fallbackMetricsHtml = buildDockMetricsHtml(null, live);
+      if (dockMetricsEl.innerHTML !== fallbackMetricsHtml) dockMetricsEl.innerHTML = fallbackMetricsHtml;
+      if (dockCostEl.innerHTML !== costHtml) dockCostEl.innerHTML = costHtml;
+      dockEl.style.display = 'inline-flex';
+      return;
+    }
+    live = live || parseLiveMetrics(source);
     if (document.body) document.body.appendChild(dockEl);
     document.getElementById('ag-ledger-dock-hint')?.remove();
-    const metricsHtml = buildDockMetricsHtml(metrics, live);
+    const metricsHtml = buildDockMetricsHtml(source, live);
     if (dockMetricsEl.innerHTML !== metricsHtml) dockMetricsEl.innerHTML = metricsHtml;
-    const costText = costLabel || '💰 —';
-    if (dockCostEl.textContent !== costText) dockCostEl.textContent = costText;
+    if (dockCostEl.innerHTML !== costHtml) dockCostEl.innerHTML = costHtml;
     dockEl.style.display = 'inline-flex';
   }
 
@@ -424,38 +929,51 @@
     const badge = live ? live.healthLabel : sess?.healthLabel || '—';
     const spd = live?.speed || sess?.speed || {};
 
+    const sessionMoney = sess?.sessionTotals
+      ? fmtMoney(sess.sessionTotals.totalUSD, fx, state.currency)
+      : '—';
+    const todayMoney = sess?.sessionTotals?.todayUSD == null
+      ? '—'
+      : fmtMoney(sess.sessionTotals.todayUSD, fx, state.currency);
+    const usedLabel = live?.contextUsedLabel || fmtTokens(sess?.contextUsed || 0);
+    const limitLabel = live?.contextLimitLabel || fmtTokens(sess?.contextLimit || 512000);
+    const remLabel = sess ? fmtTokens(sess.remainingTokens) : '—';
+    const hitRate = (live?.sessionCacheRate ?? sess?.sessionTotals?.cacheHitRate ?? 0).toFixed(1);
+    const barTone = tone === 'good' ? 'info' : tone;
     const cumLine = sess?.sessionTotals
-      ? `单会话累计 (${sess.sessionTotals.turns} 轮 / ${sess.sessionTotals.calls} 次调用)：新增 ${fmtTokens(sess.sessionTotals.inputTokens)} + 缓存 ${fmtTokens(sess.sessionTotals.cacheTokens)} (${sess.sessionTotals.cacheHitRate}%) · 输出 ${fmtTokens(sess.sessionTotals.outputTokens)} · ≈ ${fmtMoney(sess.sessionTotals.totalUSD, fx, state.currency)}`
+      ? `单会话全程 (${sess.sessionTotals.turns} 轮 / ${sess.sessionTotals.calls} 次调用)：新增 ${fmtTokens(sess.sessionTotals.inputTokens)} + 缓存 ${fmtTokens(sess.sessionTotals.cacheTokens)} (${sess.sessionTotals.cacheHitRate}%) · 输出 ${fmtTokens(sess.sessionTotals.outputTokens)} · ≈ ${sessionMoney}`
       : '账本服务未连接，仅展示补丁实时指标。';
 
     refs.sessionPair.innerHTML = `
       <div class="ag-ledger-card">
         <div class="ag-ledger-card-head">
-          <span>⭐ 核心用量速览（512K 压缩水位线）</span>
-          <span class="ag-ledger-pill" data-tone="${tone}">${badge}</span>
+          <span>核心用量速览（512K 压缩水位线）</span>
+          <span class="ag-ledger-head-side">
+            <span class="ag-ledger-session-amt">本路今日 ${esc(todayMoney)}</span>
+            <span class="ag-ledger-badge" data-tone="${esc(tone)}">${esc(badge)}</span>
+          </span>
         </div>
-        <div class="ag-ledger-progress"><div data-tone="${tone}" style="width:${Math.min(100, usedPct)}%"></div></div>
+        <div class="ag-ledger-progress"><div data-tone="${esc(barTone)}" style="width:${Math.min(100, usedPct)}%"></div></div>
         <div class="ag-ledger-mini-grid">
-          <div><div class="ag-ledger-mini-lbl">当前已用</div><div class="ag-ledger-mini-val">${live?.contextUsedLabel || fmtTokens(sess?.contextUsed || 0)} (${Math.round(usedPct)}%)</div></div>
-          <div><div class="ag-ledger-mini-lbl">压缩水位线</div><div class="ag-ledger-mini-val">${live?.contextLimitLabel || fmtTokens(sess?.contextLimit || 512000)}</div></div>
-          <div><div class="ag-ledger-mini-lbl">距压缩余量</div><div class="ag-ledger-mini-val">${sess ? fmtTokens(sess.remainingTokens) : '—'}</div></div>
-          <div><div class="ag-ledger-mini-lbl">缓存命中率</div><div class="ag-ledger-mini-val">${(live?.sessionCacheRate ?? sess?.sessionTotals?.cacheHitRate ?? 0).toFixed(1)}%</div></div>
+          <div><div class="ag-ledger-mini-lbl">当前已用</div><div class="ag-ledger-mini-val">${esc(usedLabel)} (${Math.round(usedPct)}%)</div></div>
+          <div><div class="ag-ledger-mini-lbl">压缩水位线</div><div class="ag-ledger-mini-val">${esc(limitLabel)}</div></div>
+          <div><div class="ag-ledger-mini-lbl">距压缩余量</div><div class="ag-ledger-mini-val">${esc(remLabel)}</div></div>
+          <div><div class="ag-ledger-mini-lbl">缓存命中率</div><div class="ag-ledger-mini-val">${hitRate}%</div></div>
         </div>
-        <div class="ag-ledger-foot">${cumLine}</div>
-        <div class="ag-ledger-foot">${live?.healthNote || sess?.healthNote || ''}</div>
+        <div class="ag-ledger-foot">${esc(cumLine)}</div>
       </div>
       <div class="ag-ledger-card">
         <div class="ag-ledger-card-head">
-          <span>⚡ 最新生成速度与耗时</span>
-          <span class="ag-ledger-pill" data-tone="${spd.tone || 'muted'}">${spd.badgeLabel || '—'}</span>
+          <span>最新生成速度与耗时</span>
+          <span class="ag-ledger-badge" data-tone="${esc(spd.tone || 'muted')}">${esc(spd.badgeLabel || '—')}</span>
         </div>
         <div class="ag-ledger-mini-grid">
           <div><div class="ag-ledger-mini-lbl">输出速度</div><div class="ag-ledger-mini-val">${spd.tokensPerSec != null ? `${spd.tokensPerSec} tok/s` : '—'}</div></div>
           <div><div class="ag-ledger-mini-lbl">生成耗时</div><div class="ag-ledger-mini-val">${spd.durationSec != null ? `${spd.durationSec}s` : '—'}</div></div>
           <div><div class="ag-ledger-mini-lbl">首字延迟</div><div class="ag-ledger-mini-val">${spd.ttftSec != null ? `${spd.ttftSec}s` : '—'}</div></div>
-          <div><div class="ag-ledger-mini-lbl">本次输出</div><div class="ag-ledger-mini-val">${spd.outLabel || (spd.outputTokens ? `${spd.outputTokens} tok` : '—')}</div></div>
+          <div><div class="ag-ledger-mini-lbl">本次输出</div><div class="ag-ledger-mini-val">${esc(spd.outLabel || (spd.outputTokens ? `${spd.outputTokens} tok` : '—'))}</div></div>
         </div>
-        <div class="ag-ledger-foot">${spd.note || '—'}</div>
+        <div class="ag-ledger-foot">${esc(spd.note || '—')}</div>
       </div>
     `;
   }
@@ -486,86 +1004,254 @@
     if (!Array.isArray(models) || models.length === 0) {
       return '<div class="ag-ledger-model-row">当前筛选范围内暂无模型调用记录</div>';
     }
-    return models
+    const sum = models.reduce((n, m) => n + (m.totalTokens || 0), 0) || 1;
+    const head = `<div class="ag-ledger-model-head"><span>模型</span><span>轮次</span><span>输入</span><span>输出含思考</span><span>缓存</span><span>合计</span><span>占比</span></div>`;
+    const rows = models
+      .map((m) => {
+        const share = ((m.totalTokens || 0) / sum) * 100;
+        const width = Math.max(0, Math.min(100, share));
+        return `<div class="ag-ledger-model-row">
+          <span class="ag-ledger-model-name" title="${esc(m.label)}">${esc(m.label)}</span>
+          <span>${m.steps}</span>
+          <span>${fmtTokens(m.inputTokens)}</span>
+          <span>${fmtTokens(m.outputTokens)}</span>
+          <span>${fmtTokens(m.cacheTokens)}</span>
+          <span>${fmtTokens(m.totalTokens)}</span>
+          <span class="ag-ledger-share">
+            <span class="ag-ledger-share-track"><i style="width:${width.toFixed(1)}%"></i></span>
+            <b>${share.toFixed(1)}%</b>
+          </span>
+        </div>`;
+      })
+      .join('');
+    return head + rows;
+  }
+
+  function esc(s) {
+    return String(s || '').replace(/[&<>"]/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]));
+  }
+
+  function todaySource(snap) {
+    if (snap.preciseView) return snap.preciseView;
+    const precise = snap.preciseToday;
+    if (precise && (precise.totalTokens > 0 || precise.responses > 0)) return precise;
+    const bucket = snap.fullLedger && snap.fullLedger.today;
+    if (!bucket) return null;
+    return {
+      totalTokens: bucket.totalTokens || 0,
+      inputTokens: bucket.inputTokens || 0,
+      thinkingTokens: 0,
+      outputTokens: bucket.outputTokens || 0,
+      cacheReadTokens: bucket.cacheTokens || 0,
+      cacheWriteTokens: 0,
+      sessions: bucket.sessionsCount || 0,
+      responses: bucket.steps || 0,
+      coveragePct: 0,
+      dailyAvgTokens: bucket.totalTokens || 0,
+      series: [],
+      bundledOutput: true
+    };
+  }
+
+  function filterButtons(key, items) {
+    return items
       .map(
-        (m) =>
-          `<div class="ag-ledger-model-row"><span>${m.label}（${m.steps} 次）</span><span>${fmtTokens(m.totalTokens)} · $${m.totalUSD.toFixed(2)} (≈ ¥${(m.totalUSD * fx).toFixed(2)})</span></div>`
+        ([value, label]) =>
+          `<button type="button" data-filter="${key}" data-value="${value}" class="${state.filters[key] === value ? 'is-active' : ''}">${label}</button>`
       )
       .join('');
   }
 
+  function filterSelect(id, values, current, allLabel) {
+    const opts = [`<option value="">${allLabel}</option>`];
+    for (const value of values || []) {
+      opts.push(`<option value="${esc(value)}"${value === current ? ' selected' : ''}>${esc(value)}</option>`);
+    }
+    return `<select id="${id}">${opts.join('')}</select>`;
+  }
+
+  function renderTodayPanel(snap) {
+    const day = todaySource(snap);
+    if (!day) return '<div class="ag-ledger-foot">当前筛选下还没有 Token 记录</div>';
+    const total = day.totalTokens || 0;
+    const pct = (part) => (total > 0 ? ((part / total) * 100).toFixed(part / total < 0.01 ? 2 : 1) : '0.0');
+    const promptTokens = (day.inputTokens || 0) + (day.cacheReadTokens || 0);
+    const hitRate = promptTokens > 0 ? ((day.cacheReadTokens || 0) / promptTokens) * 100 : 0;
+    const outputLabel = day.bundledOutput ? '输出含思考' : '输出 Tokens';
+    const options = snap.preciseOptions || {};
+    const rangeLabel = { today: '今日', '7d': '近7日', month: '本月', year: '年度', all: '累计' }[state.filters.range] || '今日';
+    const fx = snap.fxCny || 7.2;
+    const mainCcy = state.currency;
+    const altCcy = mainCcy === 'USD' ? 'CNY' : 'USD';
+    const cost = day.cost || {};
+    const money = (usd) => (usd == null || Number.isNaN(Number(usd)) ? '—' : fmtMoney(usd, fx, mainCcy));
+    const pctNum = (part) => (total > 0 ? Math.max(0, Math.min(100, (part / total) * 100)) : 0);
+    const inW = pctNum(day.inputTokens || 0);
+    const thinkW = pctNum(day.thinkingTokens || 0);
+    const outW = pctNum(day.outputTokens || 0);
+    const cacheW = pctNum(day.cacheReadTokens || 0);
+    const segs = [];
+    if (inW > 0) segs.push(`<span class="ag-ledger-stack-seg" data-k="in" style="flex:${inW.toFixed(2)} 0 0"></span>`);
+    if (thinkW > 0) segs.push(`<span class="ag-ledger-stack-seg" data-k="think" style="flex:${Math.max(thinkW, 0.35).toFixed(2)} 0 0"></span>`);
+    if (outW > 0) segs.push(`<span class="ag-ledger-stack-seg" data-k="out" style="flex:${Math.max(outW, 0.35).toFixed(2)} 0 0"></span>`);
+    if (cacheW > 0) segs.push(`<span class="ag-ledger-stack-seg" data-k="cache" style="flex:${cacheW.toFixed(2)} 0 0"></span>`);
+
+    return `
+      <div class="ag-ledger-filters">
+        <div class="ag-ledger-seg">${filterButtons('range', [['today', '今日'], ['7d', '近7日'], ['month', '本月'], ['year', '年度'], ['all', '累计']])}</div>
+        <div class="ag-ledger-filter-selects">
+          ${filterSelect('ag-ledger-filter-category', options.categories, state.filters.category, '全部会话')}
+          ${filterSelect('ag-ledger-filter-model', options.models, state.filters.model, '全部模型')}
+          ${filterSelect('ag-ledger-filter-workspace', options.workspaces, state.filters.workspace, '全部工作区')}
+        </div>
+      </div>
+      <div class="ag-ledger-cost-grid">
+        <div class="ag-ledger-kpi"><div class="ag-ledger-cost-lbl">${rangeLabel}折算金额</div><div class="ag-ledger-cost-val">${money(cost.totalUSD)}</div><div class="ag-ledger-cost-sub">≈ ${money(cost.totalUSD).startsWith('—') ? '—' : fmtMoney(cost.totalUSD, fx, altCcy)}</div></div>
+        <div class="ag-ledger-kpi"><div class="ag-ledger-cost-lbl">输入</div><div class="ag-ledger-cost-val">${money(cost.inputUSD)}</div><div class="ag-ledger-cost-sub">${fmtWan(day.inputTokens, 1)}</div></div>
+        <div class="ag-ledger-kpi"><div class="ag-ledger-cost-lbl">输出</div><div class="ag-ledger-cost-val">${money(cost.outputUSD)}</div><div class="ag-ledger-cost-sub">含思考 ${fmtWan((day.thinkingTokens || 0) + (day.outputTokens || 0), 1)}</div></div>
+        <div class="ag-ledger-kpi" data-tone="good"><div class="ag-ledger-cost-lbl">缓存净省</div><div class="ag-ledger-cost-val">${money(cost.savedUSD)}</div><div class="ag-ledger-cost-sub">缓存费用 ${money(cost.cacheUSD)} · 日均 ${money(cost.dailyAvgUSD)}</div></div>
+      </div>
+      <div class="ag-ledger-today-top">
+        <div class="ag-ledger-today-v-row">
+          <span class="ag-ledger-today-k">精确合计 Tokens</span>
+          <div class="ag-ledger-today-v">${fmtWan(total)}</div>
+          <div class="ag-ledger-today-exact">${fmtExact(total)} tokens</div>
+        </div>
+        <div class="ag-ledger-today-side">
+          <div><span>会话数</span><b>${day.sessions || 0}</b></div>
+          <div><span>响应轮次</span><b>${day.responses || 0}</b></div>
+          <div><span>精确覆盖率</span><b>${Number(day.coveragePct || 0).toFixed(1)}%</b></div>
+          <div><span>活跃日均</span><b>${fmtWan(day.dailyAvgTokens || total)}</b></div>
+        </div>
+      </div>
+      <div class="ag-ledger-stack-bar">${segs.join('')}</div>
+      <div class="ag-ledger-stack-legend">
+        <span><i data-k="in"></i>输入 ${pct(day.inputTokens)}%</span>
+        <span><i data-k="think"></i>思考 ${pct(day.thinkingTokens)}%</span>
+        <span><i data-k="out"></i>输出 ${pct(day.outputTokens)}%</span>
+        <span><i data-k="cache"></i>缓存 ${pct(day.cacheReadTokens)}%</span>
+      </div>
+      <div class="ag-ledger-today-metrics">
+        <div class="ag-ledger-today-metric" data-k="in"><div class="ag-ledger-metric-head"><span class="ag-ledger-swatch" data-k="in"></span>输入</div><b>${fmtWan(day.inputTokens, 1)}</b><small>${pct(day.inputTokens)}% · ${fmtExact(day.inputTokens)}</small></div>
+        <div class="ag-ledger-today-metric" data-k="think"><div class="ag-ledger-metric-head"><span class="ag-ledger-swatch" data-k="think"></span>思考</div><b>${fmtWan(day.thinkingTokens, 1)}</b><small>${pct(day.thinkingTokens)}% · ${fmtExact(day.thinkingTokens)}</small></div>
+        <div class="ag-ledger-today-metric" data-k="out"><div class="ag-ledger-metric-head"><span class="ag-ledger-swatch" data-k="out"></span>${outputLabel.replace(' Tokens', '')}</div><b>${fmtWan(day.outputTokens, 1)}</b><small>${pct(day.outputTokens)}% · ${fmtExact(day.outputTokens)}</small></div>
+        <div class="ag-ledger-today-metric" data-k="cache"><div class="ag-ledger-metric-head"><span class="ag-ledger-swatch" data-k="cache"></span>缓存读取</div><b>${fmtWan(day.cacheReadTokens, 1)}</b><small>${pct(day.cacheReadTokens)}% · W ${fmtWan(day.cacheWriteTokens || 0, 1)}</small></div>
+        <div class="ag-ledger-today-metric" data-k="hit"><div class="ag-ledger-metric-head"><span class="ag-ledger-swatch" data-k="hit"></span>缓存命中率</div><b>${hitRate.toFixed(1)}%</b><small>读取 ÷ (输入+读取)</small></div>
+      </div>`;
+  }
+
   function renderLedgerSections(snap, live) {
     if (!snap) {
-      refs.costSection.innerHTML = '<div class="ag-ledger-foot">账本 API 未就绪（请保持 node src/server.js 运行于 127.0.0.1:19825）</div>';
+      if (refs.today) refs.today.innerHTML = '<div class="ag-ledger-foot">账本 API 未就绪（请保持 node src/server.js 运行于 127.0.0.1:19825）</div>';
       refs.period.innerHTML = '';
       refs.activity.innerHTML = '';
       return;
     }
     const fx = snap.fxCny || 7.2;
-    const ledger = state.onlyFresh ? snap.freshLedger : snap.fullLedger;
-    const heat = state.onlyFresh ? snap.freshHeatmap : snap.fullHeatmap;
+    const ledger = snap.fullLedger;
+    const heat = snap.fullHeatmap;
     const mainCcy = state.currency;
-    const altCcy = mainCcy === 'USD' ? 'CNY' : 'USD';
 
-    const todayText = fmtMoney(ledger.today.cost.totalUSD, fx, mainCcy);
-    const totalText = fmtMoney(ledger.allTime.cost.totalUSD, fx, mainCcy);
-    state.topCostLabel = `💰 ${todayText} · 总${totalText}`;
+    state.topCostToday = fmtMoney(ledger.today.cost.totalUSD, fx, mainCcy);
+    state.topCostTotal = fmtMoney(ledger.allTime.cost.totalUSD, fx, mainCcy);
 
-    const scopeLabel = state.onlyFresh
-      ? `自安装起算 (${snap.sinceLocalLabel}) · 无回溯`
-      : '全量历史 52 周回溯';
-    const scopeTone = state.onlyFresh ? 'good' : 'muted';
+    if (refs.ccyBtn) {
+      refs.ccyBtn.textContent = mainCcy === 'CNY' ? '¥ CNY 主显' : '$ USD 主显';
+    }
+    if (refs.dockCcyBtn) {
+      refs.dockCcyBtn.textContent = mainCcy;
+    }
+    if (refs.dockToggleBtn) {
+      refs.dockToggleBtn.textContent = state.boardOpen ? '▲' : '▼';
+    }
+    if (refs.connChip) {
+      refs.connChip.textContent = state.apiOk ? '127.0.0.1:19825 已连接' : '本地账本离线';
+    }
+    if (refs.pinBtn) {
+      const pinned = Boolean(state.pinnedConvId);
+      refs.pinBtn.textContent = pinned ? '已锁定本路' : '自动跟随会话';
+      refs.pinBtn.classList.toggle('is-active', pinned);
+    }
 
-    refs.costSection.innerHTML = `
-      <div class="ag-ledger-card-head">
-        <div>💰 API 折算汇总金额 <span class="ag-ledger-pill" data-tone="${scopeTone}">${scopeLabel}</span></div>
-        <div class="ag-ledger-seg">
-          <button type="button" id="ag-ledger-scope" class="${state.onlyFresh ? 'is-active' : ''}">${state.onlyFresh ? '仅算新账 ✓' : '仅算新账'}</button>
-          <button type="button" id="ag-ledger-ccy" class="is-active">${mainCcy === 'CNY' ? '¥ CNY 主显' : '$ USD 主显'}</button>
-        </div>
-      </div>
-      <div class="ag-ledger-cost-grid">
-        <div><div class="ag-ledger-cost-lbl">今日汇总</div><div class="ag-ledger-cost-val">${fmtMoney(ledger.today.cost.totalUSD, fx, mainCcy)}</div><div class="ag-ledger-cost-sub">≈ ${fmtMoney(ledger.today.cost.totalUSD, fx, altCcy)}</div></div>
-        <div><div class="ag-ledger-cost-lbl">本月汇总</div><div class="ag-ledger-cost-val">${fmtMoney(ledger.month.cost.totalUSD, fx, mainCcy)}</div><div class="ag-ledger-cost-sub">日均 ${fmtMoney(ledger.month.cost.dailyAvgUSD, fx, mainCcy)}</div></div>
-        <div><div class="ag-ledger-cost-lbl">累计总金额</div><div class="ag-ledger-cost-val">${fmtMoney(ledger.allTime.cost.totalUSD, fx, mainCcy)}</div><div class="ag-ledger-cost-sub">${ledger.allTime.activeDays} 天活跃</div></div>
-        <div><div class="ag-ledger-cost-lbl">缓存命中净省</div><div class="ag-ledger-cost-val">${fmtMoney(ledger.allTime.cost.savedUSD, fx, mainCcy)}</div><div class="ag-ledger-cost-sub">命中率 ${ledger.allTime.cacheHitRate}% · 省 ${fmtMoney(ledger.allTime.cost.savedUSD, fx, altCcy)}</div></div>
-      </div>
-      <div class="ag-ledger-foot">今日拆分：输入 ${fmtMoney(ledger.today.cost.inputUSD, fx, mainCcy)} · 缓存 ${fmtMoney(ledger.today.cost.cacheUSD, fx, mainCcy)} · 输出 ${fmtMoney(ledger.today.cost.outputUSD, fx, mainCcy)}</div>
-    `;
-
-    refs.period.innerHTML = ['allTime', 'today', 'month', 'year']
+    const preciseLedger = snap.preciseLedger;
+    if (refs.today) refs.today.innerHTML = renderTodayPanel(snap);
+    refs.period.innerHTML = ['allTime', 'month', 'year']
       .map((key, i) => {
-        const labels = ['累计', '今日', '本月', '年度'];
-        const bucket = ledger[key];
+        const labels = ['累计', '本月', '年度'];
+        const raw = (preciseLedger && preciseLedger[key]) || (snap.fullLedger && snap.fullLedger[key]);
+        const bucket = {
+          totalTokens: raw.totalTokens || 0,
+          inputTokens: raw.inputTokens || 0,
+          thinkingTokens: raw.thinkingTokens || 0,
+          outputTokens: raw.outputTokens || 0,
+          cacheTokens: raw.cacheReadTokens != null ? raw.cacheReadTokens : raw.cacheTokens || 0,
+          sessionsCount: raw.sessions != null ? raw.sessions : raw.sessionsCount || 0,
+          steps: raw.responses != null ? raw.responses : raw.steps || 0
+        };
+        const total = bucket.totalTokens || 0;
+        const pct = (part) => (total > 0 ? ((part / total) * 100).toFixed(1) : '0.0');
+        const split = raw.thinkingTokens != null;
         return `
           <div class="ag-ledger-card">
-            <div class="ag-ledger-card-head"><span>${labels[i]} Token</span><span class="ag-ledger-pill">${labels[i]}</span></div>
-            <div class="ag-ledger-period-val">${fmtTokens(bucket.totalTokens)}</div>
-            <div class="ag-ledger-foot">缓存命中率 ${bucket.cacheHitRate.toFixed(1)}% · 缓存 ${fmtTokens(bucket.cacheTokens)}</div>
-            <div class="ag-ledger-foot">≈ ${fmtMoney(bucket.cost.totalUSD, fx, mainCcy)}</div>
+            <div class="ag-ledger-card-head"><span>${labels[i]}精确合计</span><span class="ag-ledger-badge">${labels[i]}</span></div>
+            <div class="ag-ledger-period-val">${fmtWan(total)}</div>
+            <div class="ag-ledger-period-lines">
+              <div>${fmtExact(total)} tokens</div>
+              <div>输入 ${fmtWan(bucket.inputTokens, 1)} · ${pct(bucket.inputTokens)}% · ${split ? `思考 ${fmtWan(bucket.thinkingTokens, 1)} · 输出 ${fmtWan(bucket.outputTokens, 1)}` : `输出含思考 ${fmtWan(bucket.outputTokens, 1)}`}</div>
+              <div>缓存 ${fmtWan(bucket.cacheTokens, 1)} · 会话 ${bucket.sessionsCount} · 响应 ${bucket.steps}</div>
+            </div>
           </div>`;
       })
       .join('');
 
+    const showModels = state.activityTab === 'models';
+    const scopeCurrent = state.activityScope === 'current';
+    const viewLedger = scopeCurrent && snap.activeLedger ? snap.activeLedger : ledger;
+    const scopeSeg = showModels
+      ? `<div class="ag-ledger-seg">
+            <button type="button" id="ag-ledger-scope-current" class="${scopeCurrent ? 'is-active' : ''}">当前对话</button>
+            <button type="button" id="ag-ledger-scope-all" class="${scopeCurrent ? '' : 'is-active'}">全部对话</button>
+          </div>`
+      : '';
     refs.activity.innerHTML = `
       <div class="ag-ledger-card-head">
-        <span>Token 活动 · 首次 ${ledger.firstActiveDate}</span>
-        <div class="ag-ledger-seg">
-          <button type="button" id="ag-ledger-tab-heat" class="is-active">52 周热力图</button>
-          <button type="button" id="ag-ledger-tab-models">模型费用构成</button>
+        <span>Token 活动 · 首次 ${ledger.firstActiveDate}${showModels ? '' : '<span id="ag-ledger-heat-tip" class="ag-ledger-heat-tip">鼠标移到格子可查看当日明细</span>'}</span>
+        <div class="ag-ledger-head-actions">
+          ${scopeSeg}
+          <div class="ag-ledger-seg">
+            <button type="button" id="ag-ledger-tab-heat" class="${showModels ? '' : 'is-active'}">52 周热力图</button>
+            <button type="button" id="ag-ledger-tab-models" class="${showModels ? 'is-active' : ''}">模型费用构成</button>
+          </div>
         </div>
       </div>
-      <div id="ag-ledger-pane-heat">${renderHeatmap(heat, fx)}</div>
-      <div id="ag-ledger-pane-models" hidden>${renderModels(ledger.byModel, fx)}</div>
+      <div id="ag-ledger-pane-heat" class="ag-ledger-heat-wrap"${showModels ? ' hidden' : ''}>${renderHeatmap(heat, fx)}</div>
+      <div id="ag-ledger-pane-models"${showModels ? '' : ' hidden'}>${renderModels(viewLedger.byModel, fx)}</div>
     `;
 
+  }
+
+  function fitBoard() {
+    if (!boardEl || !state.boardOpen) return;
+    const fit = boardEl.querySelector('.ag-ledger-fit');
+    if (!fit) return;
+    fit.style.zoom = '1';
+    const styles = getComputedStyle(boardEl);
+    const pad = (parseFloat(styles.paddingTop) || 0) + (parseFloat(styles.paddingBottom) || 0);
+    const gap = parseFloat(styles.rowGap || styles.gap) || 0;
+    const header = boardEl.querySelector('.ag-ledger-hdr');
+    const headerH = header ? header.offsetHeight : 0;
+    const maxH = parseFloat(styles.maxHeight) || window.innerHeight - 80;
+    const avail = maxH - pad - headerH - gap;
+    const need = fit.scrollHeight;
+    if (avail < 80 || need <= avail) return;
+    const scale = Math.max(0.75, Math.min(1, avail / need));
+    fit.style.zoom = String(scale);
   }
 
   function renderAll() {
     ensureShell();
     const metrics = window.__ag_last_metrics || null;
     const live = parseLiveMetrics(metrics);
-    syncDock(metrics, state.topCostLabel, live);
     if (refs.offline) {
       if (!state.apiOk) {
         refs.offline.hidden = false;
@@ -577,12 +1263,22 @@
     }
     renderSessionCards(live, state.snapshot);
     renderLedgerSections(state.snapshot, live);
+    syncDock(metrics, live);
     syncBoardDom();
+    fitBoard();
   }
 
   async function refreshSnapshot() {
-    const convId = state.pinnedConvId || extractCascadeId();
-    const qs = convId ? `?convId=${encodeURIComponent(convId)}` : '';
+    const convId = state.pinnedConvId || readFocusedPillPayload()?.cascadeId || extractCascadeId();
+    const params = new URLSearchParams();
+    if (convId) params.set('convId', convId);
+    const filters = state.filters || {};
+    params.set('range', filters.range || 'today');
+    params.set('grain', filters.grain || 'day');
+    if (filters.category) params.set('category', filters.category);
+    if (filters.model) params.set('model', filters.model);
+    if (filters.workspace) params.set('workspace', filters.workspace);
+    const qs = `?${params.toString()}`;
     const keepBoardOpen = state.boardOpen;
     try {
       const res = await fetch(`${API_BASE}/api/snapshot${qs}`, { cache: 'no-store' });
@@ -606,45 +1302,92 @@
       }
     } catch (e) {}
     const metrics = window.__ag_last_metrics || null;
-    syncDock(metrics, state.topCostLabel, parseLiveMetrics(metrics));
+    syncDock(metrics, parseLiveMetrics(metrics));
     if (state.boardOpen) hideCoreMetricsTooltip();
   };
 
-  ensureShell();
-  setBoardOpen(state.boardOpen);
-
-  const pollMs = 3500;
-  const intervalId = setInterval(() => {
-    void refreshSnapshot();
-  }, pollMs);
-
-  const fastId = setInterval(tick, 800);
-
-  window.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && state.boardOpen) setBoardOpen(false);
-  });
-
+  let cancelled = false;
+  let bootStarted = false;
+  let intervalId = 0;
+  let fastId = 0;
+  let quotaId = 0;
   let resizeRaf = 0;
-  window.addEventListener('resize', () => {
-    if (resizeRaf) return;
-    resizeRaf = requestAnimationFrame(() => {
-      resizeRaf = 0;
-      const metrics = window.__ag_last_metrics || null;
-      syncDock(metrics, state.topCostLabel, parseLiveMetrics(metrics));
-    });
-  });
+  const unlisten = [];
 
-  if (typeof ctx !== 'undefined' && ctx.onCleanup) {
-    ctx.onCleanup(() => {
-      clearInterval(intervalId);
-      clearInterval(fastId);
-      if (resizeRaf) cancelAnimationFrame(resizeRaf);
-      boardEl?.remove();
-      backdropEl?.remove();
-      dockEl?.remove();
-    });
+  function listen(target, type, fn, opts) {
+    target.addEventListener(type, fn, opts);
+    unlisten.push(() => target.removeEventListener(type, fn, opts));
   }
 
-  void refreshSnapshot();
-  tick();
+  function cleanupLedger() {
+    if (cancelled) return;
+    cancelled = true;
+    clearInterval(intervalId);
+    clearInterval(fastId);
+    clearInterval(quotaId);
+    if (resizeRaf) cancelAnimationFrame(resizeRaf);
+    resizeRaf = 0;
+    while (unlisten.length) {
+      try { unlisten.pop()(); } catch (e) {}
+    }
+    document.querySelectorAll('#ag-ledger-dock, #ag-ledger-board, #ag-ledger-backdrop').forEach((el) => {
+      el.classList.add('ag-ledger-stale');
+      el.remove();
+    });
+    boardEl = null;
+    backdropEl = null;
+    dockEl = null;
+    dockQuotaEl = null;
+  }
+
+  window.__agLedgerCleanup = cleanupLedger;
+  if (typeof ctx !== 'undefined' && ctx.onCleanup) ctx.onCleanup(cleanupLedger);
+
+  /** 新窗口的补丁脚本在 document-start 执行，此时还没有 body，必须等 DOM 再挂停靠条 */
+  function bootLedger() {
+    if (cancelled || bootStarted) return;
+    if (!document.body) {
+      listen(document, 'DOMContentLoaded', bootLedger, { once: true });
+      return;
+    }
+    bootStarted = true;
+    document.querySelectorAll('#ag-ledger-board, #ag-ledger-backdrop, #ag-ledger-dock').forEach((el) => el.remove());
+    boardEl = null;
+    backdropEl = null;
+    dockEl = null;
+    ensureShell();
+    setBoardOpen(state.boardOpen);
+
+    intervalId = setInterval(() => {
+      void refreshSnapshot();
+    }, 3500);
+    fastId = setInterval(tick, 800);
+    quotaId = setInterval(() => { void refreshQuota(false); }, 45000);
+    void refreshQuota(false);
+
+    listen(window, 'keydown', (e) => {
+      if (e.key === 'Escape' && state.boardOpen) setBoardOpen(false);
+    });
+    listen(document, 'focusin', (e) => {
+      const box = boxFromNode(e.target);
+      if (!box) return;
+      lastFocusedBox = box;
+      tick();
+    }, true);
+    listen(window, 'resize', () => {
+      if (resizeRaf) return;
+      resizeRaf = requestAnimationFrame(() => {
+        resizeRaf = 0;
+        if (cancelled) return;
+        const metrics = window.__ag_last_metrics || null;
+        syncDock(metrics, parseLiveMetrics(metrics));
+        fitBoard();
+      });
+    });
+
+    void refreshSnapshot();
+    tick();
+  }
+
+  bootLedger();
 })();

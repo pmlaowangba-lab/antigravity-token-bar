@@ -58,7 +58,14 @@ function startTokenBarServer(options = {}) {
 
       if (pathname === '/api/snapshot' || pathname === '/summary-pill') {
         const convId = urlObj.searchParams.get('convId') || undefined;
-        const snap = scanner.getSnapshot({ convId });
+        const snap = scanner.getSnapshot({
+          convId,
+          range: urlObj.searchParams.get('range') || undefined,
+          grain: urlObj.searchParams.get('grain') || undefined,
+          model: urlObj.searchParams.get('model') || undefined,
+          workspace: urlObj.searchParams.get('workspace') || undefined,
+          category: urlObj.searchParams.get('category') || undefined
+        });
         if (pathname === '/summary-pill') {
           return sendJson(res, 200, {
             ok: true,

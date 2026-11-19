@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const pricing = require('./pricing-engine');
+const { loadUsageIndex, aggregateUsage, preciseBuckets } = require('./sqlite-usage');
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MODEL_CHANGE_REGEX = /Model Selection`?\s+(?:from\s+[^`]+?\s+)?to\s+`?([^.`<\n]+)`?/i;
@@ -144,6 +145,8 @@ function parseConversationLog(filePath, convId, mtimeMs) {
   let sumCache = 0;
   let sumOutput = 0;
   let sumUSD = 0;
+  let sumUSDToday = 0;
+  const todayStr = pricing.formatLocalDate(new Date());
 
   for (let i = 0; i < rawEntries.length; i++) {
     const { obj, tsMs, modelAtStep } = rawEntries[i];
@@ -193,6 +196,9 @@ function parseConversationLog(filePath, convId, mtimeMs) {
     sumCache += caTok;
     sumOutput += outTok;
     sumUSD += stepCost.totalUSD;
+    if (pricing.formatLocalDate(new Date(tsMs)) === todayStr) {
+      sumUSDToday += stepCost.totalUSD;
+    }
 
     plannerSteps.push({
       convId,
@@ -227,7 +233,8 @@ function parseConversationLog(filePath, convId, mtimeMs) {
       cacheTokens: sumCache,
       cacheHitRate: promptSum > 0 ? Number(((sumCache / promptSum) * 100).toFixed(1)) : 0,
       outputTokens: sumOutput,
-      totalUSD: Math.round(sumUSD * 10000) / 10000
+      totalUSD: Math.round(sumUSD * 10000) / 10000,
+      todayUSD: Math.round(sumUSDToday * 10000) / 10000
     }
   };
 }
@@ -251,10 +258,11 @@ function addStepIntoBuckets(bucketsMap, step) {
   day.steps += 1;
   day.sessions.add(step.convId);
 
-  let m = day.models[step.modelKey];
+  const modelId = step.modelLabel || step.modelKey;
+  let m = day.models[modelId];
   if (!m) {
-    m = { label: step.modelLabel, input: 0, cache: 0, output: 0, steps: 0 };
-    day.models[step.modelKey] = m;
+    m = { label: modelId, input: 0, cache: 0, output: 0, steps: 0 };
+    day.models[modelId] = m;
   }
   m.input += step.inputTokens;
   m.cache += step.cacheTokens;
@@ -285,7 +293,8 @@ function buildActiveSessionView(parsedConv) {
         cacheTokens: 0,
         cacheHitRate: 0,
         outputTokens: 0,
-        totalUSD: 0
+        totalUSD: 0,
+        todayUSD: 0
       },
       speed: {
         tokensPerSec: null,
@@ -397,6 +406,9 @@ function buildActiveSessionView(parsedConv) {
 function createLogScanner(options = {}) {
   const home = os.homedir();
   const brainRootDir = options.brainRootDir || path.join(home, '.gemini', 'antigravity', 'brain');
+  const conversationsDir = options.conversationsDir !== undefined
+    ? options.conversationsDir
+    : (options.brainRootDir ? null : path.join(home, '.gemini', 'antigravity', 'conversations'));
   const stateFilePath = options.stateFilePath || path.join(home, '.antigravity-token-bar', 'state.json');
   const legacyStatePath = path.join(home, '.gemini', 'config', 'plugin-data', 'token-meter', 'standalone-state.json');
 
@@ -484,8 +496,15 @@ function createLogScanner(options = {}) {
       };
     });
 
+    const activeBuckets = {};
+    if (targetParsed) {
+      for (const step of targetParsed.steps) addStepIntoBuckets(activeBuckets, step);
+    }
+
     const todayDate = pricing.formatLocalDate(new Date());
     const sinceLocalStr = pricing.formatLocalDate(new Date(sinceMs || Date.now()));
+    const usageIndex = conversationsDir ? loadUsageIndex(conversationsDir) : null;
+    const precise = usageIndex ? preciseBuckets(usageIndex, todayDate) : null;
 
     return {
       ok: true,
@@ -496,10 +515,36 @@ function createLogScanner(options = {}) {
       selectedConvId: requestedConvId || null,
       recentSessions,
       activeSession: buildActiveSessionView(targetParsed),
+      activeLedger: pricing.summarizeBuckets(activeBuckets, { todayDate, fxCny }),
+      activeHeatmap: pricing.buildHeatmapGrid(activeBuckets, { endDate: todayDate, weeks: 52, fxCny }),
       freshLedger: pricing.summarizeBuckets(freshBuckets, { todayDate, fxCny }),
       fullLedger: pricing.summarizeBuckets(fullBuckets, { todayDate, fxCny }),
       freshHeatmap: pricing.buildHeatmapGrid(freshBuckets, { endDate: todayDate, weeks: 52, fxCny, minDate: sinceLocalStr }),
-      fullHeatmap: pricing.buildHeatmapGrid(fullBuckets, { endDate: todayDate, weeks: 52, fxCny })
+      fullHeatmap: pricing.buildHeatmapGrid(
+        (precise && precise.daily) || fullBuckets,
+        { endDate: todayDate, weeks: 52, fxCny }
+      ),
+      preciseToday: precise ? precise.cards.today : null,
+      preciseLedger: precise ? precise.cards : null,
+      preciseView: precise
+        ? aggregateUsage(usageIndex, {
+            todayDate,
+            range: query.range || 'today',
+            grain: query.grain || 'day',
+            model: query.model || '',
+            workspace: query.workspace || '',
+            category: query.category || '',
+            fxCny
+          })
+        : null,
+      preciseOptions: usageIndex
+        ? {
+            dataDir: path.dirname(conversationsDir),
+            models: usageIndex.models,
+            workspaces: usageIndex.workspaces,
+            categories: usageIndex.categories
+          }
+        : null
     };
   }
 
