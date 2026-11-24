@@ -231,6 +231,53 @@ test('4. 默认优先锁定用户最近提问窗口（防后台 Agent 抢焦点�
   }
 });
 
+test('4b. 显式 convId 且无 transcript 时不得回落到「最近会话」，本路今日为 0', async () => {
+  const { startTokenBarServer } = require('../src/server');
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'atb-conv-only-'));
+  const brainDir = path.join(tmpDir, 'brain');
+  const convUserActiveId = '11111111-aaaa-4111-8111-111111111111';
+  const convNewId = '33333333-cccc-4333-8333-333333333333';
+  const convUserDir = path.join(brainDir, convUserActiveId, '.system_generated', 'logs');
+  fs.mkdirSync(convUserDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(convUserDir, 'transcript.jsonl'),
+  `${JSON.stringify({
+      step_index: 0,
+      source: 'USER_EXPLICIT',
+      type: 'USER_INPUT',
+      created_at: '2026-11-18T12:10:00.000Z',
+      content: 'current'
+    })}\n${JSON.stringify({
+      step_index: 1,
+      type: 'PLANNER_RESPONSE',
+      created_at: '2026-11-18T12:10:01.000Z',
+      input_tokens: 60_000,
+      cache_read_tokens: 40_000,
+      output_tokens: 100
+    })}\n`
+  );
+
+  const srv = await startTokenBarServer({
+    port: 0,
+    brainRootDir: brainDir,
+    stateFilePath: path.join(tmpDir, 'state.json')
+  });
+
+  try {
+    const res = await fetch(`http://127.0.0.1:${srv.port}/api/snapshot?convId=${convNewId}`);
+    assert.equal(res.status, 200);
+    const snap = await res.json();
+    assert.equal(snap.selectedConvId, convNewId);
+    assert.equal(snap.activeSession.conversationId, convNewId);
+    assert.equal(snap.activeSession.contextUsed, 0);
+    assert.equal(snap.activeSession.sessionTotals.todayUSD, 0);
+    assert.notEqual(snap.activeSession.conversationId, convUserActiveId);
+  } finally {
+    await srv.close();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
 test('3. HTTP 服务与纯手写前端 UI 正常响应：单一大面板集成核心用量速览+生成速度+API汇总金额+热力图，且全仓零第三方署名/品牌残留', async () => {
   const { startTokenBarServer } = require('../src/server');
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'atb-http-'));
@@ -338,12 +385,51 @@ test('6. 页内看板小弹窗（套件 3 · 暖金陶土工作室）：胶囊�
   assert.match(js, /ag-ledger-qbar-row/, '额度卡应使用去拥挤的行内一体进度条 .ag-ledger-qbar-row');
   assert.match(js, /缓存命中率/, '今日指标必须保留缓存命中率字段');
   assert.match(js, /ag-ledger-btn-pin/, '顶栏应提供自动跟随/锁定本路会话交互按钮');
+  assert.match(js, /function resolveCurrentConvId/, '应用焦点/URL 解析当前对话，不得全局 localStorage 抢焦点');
+  assert.match(js, /sessionStorage\.setItem\(LS_PIN/, '锁定本路应仅存当前标签页 sessionStorage');
+  assert.match(js, /sessionAlignedWithFocus/, '路/本路今日须与当前窗口 convId 对齐后才展示金额');
   assert.match(js, /ag-ledger-btn-refresh/, '顶栏应保留强制刷新按钮');
   assert.match(js, /ag-ledger-heat-tip/, '热力图应支持悬浮显示当日明细');
   assert.match(css, /#ag-ledger-dock\s*\{[^}]*left:\s*50%/i, '顶部胶囊应居中显示避免遮挡右侧按钮');
   assert.doesNotMatch(js, /ag-dock-ccy-btn|ag-dock-toggle-btn/, '顶部胶囊不应渲染右侧 CNY 和展开按钮');
   assert.match(css, /\.ag-ledger-stack-bar\b/, '缺少 Token 堆叠占比条样式 .ag-ledger-stack-bar');
   assert.doesNotMatch(js, /⭐|⚡|💰/, '看板内应彻底移除 ⭐ / ⚡ / 💰 Emoji');
+});
+
+test('7a. aggregateUsage 支持 convId 过滤，本路金额不得与全机今日相同', () => {
+  const { aggregateUsage } = require('../src/sqlite-usage');
+  const index = {
+    events: [
+      {
+        date: '2026-11-19',
+        convId: 'conv-a',
+        model: 'Gemini 4 Carbon',
+        workspace: 'w1',
+        category: '主对话',
+        input: 1_000_000,
+        thinking: 10_000,
+        output: 20_000,
+        cacheRead: 2_000_000
+      },
+      {
+        date: '2026-11-19',
+        convId: 'conv-b',
+        model: 'Gemini 4 Neon',
+        workspace: 'w1',
+        category: '主对话',
+        input: 500_000,
+        thinking: 5_000,
+        output: 10_000,
+        cacheRead: 1_000_000
+      }
+    ]
+  };
+  const today = '2026-11-19';
+  const all = aggregateUsage(index, { todayDate: today, range: 'today' });
+  const onlyA = aggregateUsage(index, { todayDate: today, range: 'today', convId: 'conv-a' });
+  assert.ok(all.cost.totalUSD > onlyA.cost.totalUSD);
+  assert.equal(onlyA.sessions, 1);
+  assert.equal(onlyA.totalTokens, 3_030_000);
 });
 
 test('7. 方案 B 跨机共享账本（shared-ledger）：按机器×月份分片导出、多机去重合并、按机器筛选与脱敏校验', () => {
@@ -407,6 +493,80 @@ test('7. 方案 B 跨机共享账本（shared-ledger）：按机器×月份分�
 
     const buckets = preciseBuckets(merged, '2026-11-19');
     assert.equal(buckets.cards.allTime.totalTokens, 403000 + 908000 + 1515000);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('8. 多源 T3 Code 会话上下文与 Gemini 限额聚合（quota-service + brainSources）', () => {
+  const { buildQuotaPayload } = require('../src/quota-service');
+  const { createLogScanner } = require('../src/log-scanner');
+
+  // 1) 验证限额聚合：summary 仅含 3p-weekly，models 含 Gemini 剩余额度，自动聚合并把 Gemini 置顶
+  const nowMs = Date.parse('2026-11-20T07:00:00Z');
+  const payload = buildQuotaPayload(
+    {
+      groups: [
+        {
+          displayName: 'Claude and GPT models',
+          buckets: [{ bucketId: '3p-weekly', window: 'weekly', remainingFraction: 0.88, resetTime: '2026-11-27T07:00:00Z' }]
+        }
+      ]
+    },
+    {
+      models: {
+        'gemini-3-flash': { displayName: 'Gemini 3 Flash', quotaInfo: { remainingFraction: 0.72, resetTime: '2026-11-20T10:30:00Z' } },
+        'gemini-2.5-pro': { displayName: 'Gemini 2.5 Pro', quotaInfo: { remainingFraction: 0.95, resetTime: '2026-11-20T10:30:00Z' } }
+      }
+    },
+    nowMs
+  );
+  assert.equal(payload.ok, true);
+  assert.equal(payload.gemini.remainingPercent, 72);
+  assert.equal(payload.gemini.resetInText, '3时30分');
+  assert.equal(payload.groups[0].isGemini, true);
+  assert.equal(payload.groups.length, 2);
+
+  // 2) 验证多源 brainSources（T3 Code + Antigravity）及 <user_request> 内层标题提取
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'atb-t3-multi-'));
+  try {
+    const t3Brain = path.join(tmpDir, 't3-brain');
+    const convId = 'af660c0e-1f22-4ec3-8cfc-9ed0f2e4dfd1';
+    const logDir = path.join(t3Brain, convId, '.system_generated', 'logs');
+    fs.mkdirSync(logDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(logDir, 'transcript.jsonl'),
+      [
+        JSON.stringify({
+          source: 'USER_EXPLICIT',
+          type: 'USER_INPUT',
+          created_at: '2026-11-20T07:08:43Z',
+          content: '<USER_REQUEST>\n<t3_code_instructions>ignore</t3_code_instructions>\n<user_request>\n我想在每个窗口里看到 gemini 的上下文和限额\n</user_request>\n</USER_REQUEST>'
+        }),
+        JSON.stringify({
+          source: 'MODEL',
+          type: 'PLANNER_RESPONSE',
+          created_at: '2026-11-20T07:08:45Z',
+          model: 'gemini-4-neon-medium',
+          input_tokens: 40000,
+          cache_read_tokens: 112000,
+          output_tokens: 500
+        })
+      ].join('\n')
+    );
+
+    const scanner = createLogScanner({
+      brainSources: [{ dir: t3Brain, source: 'T3 Code', sourceTag: 'T3' }],
+      conversationsDir: null,
+      stateFilePath: path.join(tmpDir, 'state.json'),
+      sharedLedgerDir: ''
+    });
+    const snap = scanner.getSnapshot();
+    assert.equal(snap.activeSession.source, 'T3 Code');
+    assert.equal(snap.activeSession.sourceTag, 'T3');
+    assert.match(snap.activeSession.title, /我想在每个窗口里看到 gemini 的上下文和限额/);
+    assert.equal(snap.activeSession.contextUsed, 152000);
+    assert.equal(snap.recentSessions[0].sourceTag, 'T3');
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }

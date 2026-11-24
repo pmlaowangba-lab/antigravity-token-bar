@@ -16,6 +16,7 @@
   const LS_CCY = 'ag_ledger_ccy';
   const LS_FRESH = 'ag_ledger_only_fresh';
   const LS_PIN = 'ag_ledger_pinned_conv';
+  const LS_PIN_LEGACY = 'ag_ledger_pinned_conv';
   const LS_OPEN = 'ag_ledger_board_open';
 
   /** 避免 pointerdown 打开后同一击的 click 落在遮罩上立刻关掉面板 */
@@ -25,7 +26,16 @@
     boardOpen: localStorage.getItem(LS_OPEN) === '1',
     onlyFresh: localStorage.getItem(LS_FRESH) !== '0',
     currency: localStorage.getItem(LS_CCY) === 'CNY' ? 'CNY' : 'USD',
-    pinnedConvId: localStorage.getItem(LS_PIN) || '',
+    pinnedConvId: (() => {
+      try {
+        const tabPin = sessionStorage.getItem(LS_PIN) || '';
+        if (tabPin) return tabPin;
+      } catch (e) {}
+      try {
+        localStorage.removeItem(LS_PIN_LEGACY);
+      } catch (e) {}
+      return '';
+    })(),
     activityTab: 'heat',
     activityScope: 'all',
     filters: { range: 'today', grain: 'day', category: '', model: '', workspace: '', machine: '' },
@@ -40,6 +50,51 @@
   function takeCascadeId(value) {
     const id = String(value || '').trim().toLowerCase();
     return CASCADE_UUID_RE.test(id) ? id : '';
+  }
+
+  /** 当前标签页正在交互的对话 ID：焦点胶囊 > URL/侧栏；无明确 ID 时才用本标签页锁定 */
+  function resolveCurrentConvId() {
+    const live = takeCascadeId(readFocusedPillPayload()?.cascadeId) || takeCascadeId(extractCascadeId());
+    const pinned = takeCascadeId(state.pinnedConvId);
+    if (pinned) return pinned;
+    return live || '';
+  }
+
+  function focusedConvId() {
+    return takeCascadeId(readFocusedPillPayload()?.cascadeId) || takeCascadeId(extractCascadeId());
+  }
+
+  function snapshotConvId(snap) {
+    if (!snap) return '';
+    return takeCascadeId(snap.selectedConvId || snap.activeSession?.conversationId);
+  }
+
+  /** 账本「路」口径：有焦点时必须与 snapshot 请求的 convId 一致 */
+  function sessionAlignedWithFocus(snap) {
+    const focus = focusedConvId();
+    const selected = snapshotConvId(snap);
+    if (!focus) return Boolean(selected);
+    if (!selected) return false;
+    return focus === selected;
+  }
+
+  function readTabPin() {
+    try {
+      return sessionStorage.getItem(LS_PIN) || '';
+    } catch (e) {
+      return '';
+    }
+  }
+
+  function writeTabPin(convId) {
+    try {
+      const id = String(convId || '').trim();
+      if (id) sessionStorage.setItem(LS_PIN, id);
+      else sessionStorage.removeItem(LS_PIN);
+    } catch (e) {}
+    try {
+      localStorage.removeItem(LS_PIN_LEGACY);
+    } catch (e) {}
   }
 
   /** 与补丁内核同一套会话识别：新窗口的 id 可能在 query、watched 或侧栏，不只在 /c/ 路径里 */
@@ -323,11 +378,10 @@
   function sessionCostText() {
     const snap = state.snapshot;
     const sess = snap?.activeSession;
-    const usd = sess?.sessionTotals?.todayUSD;
-    if (!sess || usd == null) return '路—';
-    const focusedCid = String(readFocusedPillPayload()?.cascadeId || '').trim().toLowerCase();
-    const selected = String(snap.selectedConvId || sess.conversationId || '').trim().toLowerCase();
-    if (focusedCid && selected && focusedCid !== selected) return '路—';
+    if (!sess || !sessionAlignedWithFocus(snap)) return '路—';
+    const usd = sess.sessionTotals?.todayUSD;
+    if (usd == null) return '路—';
+    if (Number(usd) === 0) return '路¥0';
     return `路${fmtMoney(usd, snap.fxCny || 7.2, state.currency)}`;
   }
 
@@ -460,12 +514,12 @@
         if (id === 'ag-ledger-btn-pin') {
           if (state.pinnedConvId) {
             state.pinnedConvId = '';
-            localStorage.removeItem(LS_PIN);
+            writeTabPin('');
           } else {
-            const curCid = readFocusedPillPayload()?.cascadeId || extractCascadeId() || state.snapshot?.activeSession?.conversationId || '';
+            const curCid = resolveCurrentConvId();
             if (curCid) {
               state.pinnedConvId = curCid;
-              localStorage.setItem(LS_PIN, curCid);
+              writeTabPin(curCid);
             }
           }
           renderAll();
@@ -673,6 +727,7 @@
     const raw = bucket && bucket.remaining && bucket.remaining.case === 'remainingFraction'
       ? bucket.remaining.value
       : null;
+    if (raw == null || raw === '') return null;
     const n = Number(raw);
     if (!Number.isFinite(n)) return null;
     return Math.max(0, Math.min(100, Math.round(n * 100)));
@@ -773,12 +828,13 @@
       `<span class="ag-ledger-qbar-lbl">${label}</span>` +
       `${quotaBarHtml(pct)}` +
       `<b class="ag-ledger-qbar-pct" data-tone="${quotaColorTone(pct)}">${pct == null ? '—' : `${pct}%`}</b>` +
-      `<span class="ag-ledger-qbar-time">${esc(timeText)}后重置</span>` +
+      `<span class="ag-ledger-qbar-time">${timeText && timeText !== '—' ? `${esc(timeText)}后重置` : (pct === 100 ? '满额' : '—')}</span>` +
       `</div>`;
     const rows = [];
     if (day) rows.push(rowHtml('日额度', dayPct, quotaRemainShort(day.resetTime) || '—'));
-    rows.push(rowHtml('5小时', h5Pct, h5Time));
-    rows.push(rowHtml('周额度', weekPct, weekTime));
+    if (h5) rows.push(rowHtml('5小时', h5Pct, h5Time));
+    if (week) rows.push(rowHtml('周额度', weekPct, weekTime));
+    if (!rows.length) rows.push(rowHtml('额度', null, '—'));
     return `<div class="ag-ledger-card">
       <div class="ag-ledger-card-head">
         <span>${esc(shortQuotaName(group.displayName))} 额度</span>
@@ -843,7 +899,7 @@
 
   async function refreshQuota(force) {
     const now = Date.now();
-    if (!force && quotaState.groups && quotaState.at && now - quotaState.at < 45000) return;
+    if (!force && quotaState.groups && quotaState.at && now - quotaState.at < 4000) return;
     const svc = findQuotaService();
     if (!svc) {
       renderQuota();
@@ -882,9 +938,9 @@
       (location.pathname || '').indexOf('/c/') !== -1 || !!document.querySelector('[id="antigravity.agentSidePanelInputBox"]');
     const costHtml = buildDockCostHtml(state.topCostToday, state.topCostTotal);
     const sessionText = sessionCostText();
-    const focusedNow = String(focused?.cascadeId || '').trim();
-    if (focusedNow && focusedNow !== lastRequestedConv) {
-      lastRequestedConv = focusedNow;
+    const convNow = resolveCurrentConvId();
+    if (convNow && convNow !== lastRequestedConv) {
+      lastRequestedConv = convNow;
       void refreshSnapshot();
     }
     if (dockSessionEl && dockSessionEl.textContent !== sessionText) dockSessionEl.textContent = sessionText;
@@ -912,27 +968,42 @@
 
   function renderSessionCards(live, snap) {
     if (!refs.sessionPair) return;
-    const sess = snap?.activeSession;
+    const aligned = sessionAlignedWithFocus(snap);
+    const sess = aligned ? snap?.activeSession : null;
     const fx = snap?.fxCny || 7.2;
     const usedPct = live ? live.usedPercent : sess?.usedPercent || 0;
     const tone = live ? live.healthTone : sess?.healthTone || 'muted';
     const badge = live ? live.healthLabel : sess?.healthLabel || '—';
-    const spd = live?.speed || sess?.speed || {};
+    const liveSpd = live?.speed || {};
+    const sessSpd = sess?.speed || {};
+    const spd = {
+      ...sessSpd,
+      ...Object.fromEntries(Object.entries(liveSpd).filter(([, v]) => v != null && v !== '' && v !== '等待模型输出…'))
+    };
 
     const sessionMoney = sess?.sessionTotals
       ? fmtMoney(sess.sessionTotals.totalUSD, fx, state.currency)
       : '—';
-    const todayMoney = sess?.sessionTotals?.todayUSD == null
-      ? '—'
-      : fmtMoney(sess.sessionTotals.todayUSD, fx, state.currency);
+    const todayMoney =
+      !sess || sess.sessionTotals?.todayUSD == null
+        ? '—'
+        : fmtMoney(sess.sessionTotals.todayUSD, fx, state.currency);
     const usedLabel = live?.contextUsedLabel || fmtTokens(sess?.contextUsed || 0);
     const limitLabel = live?.contextLimitLabel || fmtTokens(sess?.contextLimit || 512000);
     const remLabel = sess ? fmtTokens(sess.remainingTokens) : '—';
-    const hitRate = (live?.sessionCacheRate ?? sess?.sessionTotals?.cacheHitRate ?? 0).toFixed(1);
+    const hitRate = ((live?.sessionCacheRate > 0 ? live.sessionCacheRate : null) ?? sess?.sessionTotals?.cacheHitRate ?? 0).toFixed(1);
     const barTone = tone === 'good' ? 'info' : tone;
-    const cumLine = sess?.sessionTotals
-      ? `单会话全程 (${sess.sessionTotals.turns} 轮 / ${sess.sessionTotals.calls} 次调用)：新增 ${fmtTokens(sess.sessionTotals.inputTokens)} + 缓存 ${fmtTokens(sess.sessionTotals.cacheTokens)} (${sess.sessionTotals.cacheHitRate}%) · 输出 ${fmtTokens(sess.sessionTotals.outputTokens)} · ≈ ${sessionMoney}`
-      : '账本服务未连接，仅展示补丁实时指标。';
+    const todaySessMoney =
+      sess?.sessionTotals?.todayUSD != null
+        ? fmtMoney(sess.sessionTotals.todayUSD, fx, state.currency)
+        : '—';
+    const cumLine = !aligned
+      ? '正在对齐当前窗口会话…（切换对话后会自动刷新本路今日，与顶栏「路」同源）'
+      : sess?.sessionTotals
+        ? `本路今日 ${todaySessMoney} · 精确账本 ${sess.sessionTotals.calls} 次响应 · 全程累计 ≈ ${sessionMoney}（${fmtTokens(sess.sessionTotals.inputTokens)} 入 + ${fmtTokens(sess.sessionTotals.cacheTokens)} 缓存 · 出 ${fmtTokens(sess.sessionTotals.outputTokens)}）`
+        : sess
+          ? '当前对话尚无账本记录，费用从首条模型回复后开始累计。'
+          : '账本服务未连接，仅展示补丁实时指标。';
 
     refs.sessionPair.innerHTML = `
       <div class="ag-ledger-card">
@@ -1022,6 +1093,8 @@
   }
 
   function todaySource(snap) {
+    const scopeCurrent = state.activityScope === 'current';
+    if (scopeCurrent && snap.selectedConvId && snap.activePreciseView) return snap.activePreciseView;
     if (snap.preciseView) return snap.preciseView;
     const precise = snap.preciseToday;
     if (precise && (precise.totalTokens > 0 || precise.responses > 0)) return precise;
@@ -1069,7 +1142,9 @@
     const hitRate = promptTokens > 0 ? ((day.cacheReadTokens || 0) / promptTokens) * 100 : 0;
     const outputLabel = day.bundledOutput ? '输出含思考' : '输出 Tokens';
     const options = snap.preciseOptions || {};
+    const scopeCurrent = state.activityScope === 'current' && Boolean(snap.selectedConvId);
     const rangeLabel = { today: '今日', '7d': '近7日', month: '本月', year: '年度', all: '累计' }[state.filters.range] || '今日';
+    const scopeNote = scopeCurrent ? ' · 本路对话' : '';
     const fx = snap.fxCny || 7.2;
     const mainCcy = state.currency;
     const altCcy = mainCcy === 'USD' ? 'CNY' : 'USD';
@@ -1097,7 +1172,7 @@
         </div>
       </div>
       <div class="ag-ledger-cost-grid">
-        <div class="ag-ledger-kpi"><div class="ag-ledger-cost-lbl">${rangeLabel}折算金额</div><div class="ag-ledger-cost-val">${money(cost.totalUSD)}</div><div class="ag-ledger-cost-sub">≈ ${money(cost.totalUSD).startsWith('—') ? '—' : fmtMoney(cost.totalUSD, fx, altCcy)}</div></div>
+        <div class="ag-ledger-kpi"><div class="ag-ledger-cost-lbl">${rangeLabel}折算金额${scopeNote}</div><div class="ag-ledger-cost-val">${money(cost.totalUSD)}</div><div class="ag-ledger-cost-sub">≈ ${money(cost.totalUSD).startsWith('—') ? '—' : fmtMoney(cost.totalUSD, fx, altCcy)}</div></div>
         <div class="ag-ledger-kpi"><div class="ag-ledger-cost-lbl">输入</div><div class="ag-ledger-cost-val">${money(cost.inputUSD)}</div><div class="ag-ledger-cost-sub">${fmtWan(day.inputTokens, 1)}</div></div>
         <div class="ag-ledger-kpi"><div class="ag-ledger-cost-lbl">输出</div><div class="ag-ledger-cost-val">${money(cost.outputUSD)}</div><div class="ag-ledger-cost-sub">含思考 ${fmtWan((day.thinkingTokens || 0) + (day.outputTokens || 0), 1)}</div></div>
         <div class="ag-ledger-kpi" data-tone="good"><div class="ag-ledger-cost-lbl">缓存净省</div><div class="ag-ledger-cost-val">${money(cost.savedUSD)}</div><div class="ag-ledger-cost-sub">缓存费用 ${money(cost.cacheUSD)} · 日均 ${money(cost.dailyAvgUSD)}</div></div>
@@ -1156,10 +1231,16 @@
     }
 
     if (refs.today) refs.today.innerHTML = renderTodayPanel(snap);
+    const scopeCurrentLed = state.activityScope === 'current' && snap.selectedConvId && snap.activePreciseLedger;
     refs.period.innerHTML = ['allTime', 'month', 'year']
       .map((key, i) => {
         const labels = ['累计', '本月', '年度'];
-        const raw = (preciseLedger && preciseLedger[key]) || (snap.fullLedger && snap.fullLedger[key]);
+        const activeRaw = scopeCurrentLed && snap.activePreciseLedger[key];
+        const raw =
+          activeRaw ||
+          (state.activityScope === 'current' && snap.activeLedger && snap.activeLedger[key]) ||
+          (preciseLedger && preciseLedger[key]) ||
+          (snap.fullLedger && snap.fullLedger[key]);
         const bucket = {
           totalTokens: raw.totalTokens || 0,
           inputTokens: raw.inputTokens || 0,
@@ -1263,7 +1344,7 @@
   }
 
   async function refreshSnapshot(fresh) {
-    const convId = state.pinnedConvId || readFocusedPillPayload()?.cascadeId || extractCascadeId();
+    const convId = resolveCurrentConvId();
     const params = new URLSearchParams();
     if (convId) params.set('convId', convId);
     const filters = state.filters || {};
@@ -1356,9 +1437,9 @@
 
     intervalId = setInterval(() => {
       void refreshSnapshot();
-    }, 3500);
+    }, 2000);
     fastId = setInterval(tick, 800);
-    quotaId = setInterval(() => { void refreshQuota(false); }, 45000);
+    quotaId = setInterval(() => { void refreshQuota(false); }, 5000);
     void refreshQuota(false);
 
     listen(window, 'keydown', (e) => {

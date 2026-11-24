@@ -24,8 +24,9 @@ final class WebBridge: NSObject, WKScriptMessageHandler {
       let ended = (body["ended"] as? Bool) ?? false
       owner?.handleDrag(dx: CGFloat(dx), dy: CGFloat(dy), ended: ended)
     case "agBarWidth":
-      if let w = (body["width"] as? NSNumber)?.doubleValue, w > 100 {
-        owner?.updateStripWidth(CGFloat(ceil(w) + 12))
+      if let w = (body["width"] as? NSNumber)?.doubleValue, w > 60 {
+        let h = (body["height"] as? NSNumber)?.doubleValue ?? 34
+        owner?.updateStripSize(width: CGFloat(ceil(w)), height: CGFloat(ceil(h)))
       }
     default:
       break
@@ -53,8 +54,12 @@ final class AppController: NSObject, NSApplicationDelegate, WKNavigationDelegate
   private var isExpanded = false
   private var overlayVisible = true
 
-  private var collapsedSize = NSSize(width: 440, height: 34)
-  private let expandedSize = NSSize(width: 752, height: 760)
+  // 仅在 Antigravity 或 T3 Code 窗口处于前台时展示，其他应用与桌面自动隐藏
+  private let targetBundleIds: Set<String> = ["com.google.antigravity", "com.t3tools.t3code"]
+  private var lastHostBundleId: String = "com.google.antigravity"
+
+  private var collapsedSize = NSSize(width: 460, height: 34)
+  private let expandedSize = NSSize(width: 960, height: 790)
 
   private var rightMargin: CGFloat = {
     if UserDefaults.standard.object(forKey: "atb_right_margin_v1") == nil { return 190 }
@@ -103,10 +108,11 @@ final class AppController: NSObject, NSApplicationDelegate, WKNavigationDelegate
     }
   }
 
-  func updateStripWidth(_ nextWidth: CGFloat) {
-    let clamped = min(680, max(220, nextWidth))
-    if abs(collapsedSize.width - clamped) > 2 {
-      collapsedSize.width = clamped
+  func updateStripSize(width nextWidth: CGFloat, height nextHeight: CGFloat) {
+    let clampedW = min(820, max(220, nextWidth))
+    let clampedH = min(52, max(28, nextHeight))
+    if abs(collapsedSize.width - clampedW) > 2 || abs(collapsedSize.height - clampedH) > 2 {
+      collapsedSize = NSSize(width: clampedW, height: clampedH)
       if !isExpanded {
         syncWindowPlacement(force: true)
       }
@@ -117,7 +123,7 @@ final class AppController: NSObject, NSApplicationDelegate, WKNavigationDelegate
     guard isExpanded != open else { return }
     isExpanded = open
     panel.allowKey = open
-    panel.hasShadow = open
+    panel.hasShadow = false
     syncWindowPlacement(force: true)
     if open {
       NSApp.activate(ignoringOtherApps: true)
@@ -159,7 +165,7 @@ final class AppController: NSObject, NSApplicationDelegate, WKNavigationDelegate
     browserItem.target = self
     menu.addItem(browserItem)
 
-    let showBarItem = NSMenuItem(title: "在 Antigravity 顶栏显示指标条", action: #selector(toggleBarVisibility(_:)), keyEquivalent: "")
+    let showBarItem = NSMenuItem(title: "在 Antigravity / T3 Code 顶栏显示指标条", action: #selector(toggleBarVisibility(_:)), keyEquivalent: "")
     showBarItem.target = self
     showBarItem.state = .on
     menu.addItem(showBarItem)
@@ -250,7 +256,7 @@ final class AppController: NSObject, NSApplicationDelegate, WKNavigationDelegate
   }
 
   private func loadOverlayPage() {
-    if let url = URL(string: "http://127.0.0.1:\(port)/?mode=overlay") {
+    if let url = URL(string: "http://127.0.0.1:\(port)/t3-overlay.html") {
       webView.load(URLRequest(url: url))
     }
   }
@@ -261,19 +267,17 @@ final class AppController: NSObject, NSApplicationDelegate, WKNavigationDelegate
       guard let data,
             let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return }
       let todayUsd = (json["todayUSD"] as? NSNumber)?.doubleValue ?? 0
-      let tok = (json["totalTokens"] as? NSNumber)?.intValue ?? 0
-      let tokText: String
-      if tok >= 1_000_000 { tokText = String(format: "%.1fM", Double(tok) / 1e6) }
-      else if tok >= 1_000 { tokText = String(format: "%.0fK", Double(tok) / 1e3) }
-      else { tokText = "\(tok)" }
-      let title = String(format: "🪙 $%.2f · %@", todayUsd, tokText)
+      let ctxPct = Int(round((json["usedPercent"] as? NSNumber)?.doubleValue ?? 0))
+      let quotaPct = (json["geminiQuotaPercent"] as? NSNumber)?.intValue
+      let quotaPart = quotaPct != nil ? " · ✦ G\(quotaPct!)%" : ""
+      let title = String(format: "◔ %d%%%@ · $%.2f", ctxPct, quotaPart, todayUsd)
       Task { @MainActor in
         self?.statusItem.button?.title = title
       }
     }.resume()
   }
 
-  private func findTargetAntigravityWindow(pid: pid_t) -> (rect: CGRect, occluded: Bool)? {
+  private func findTargetWindow(pid: pid_t) -> (rect: CGRect, occluded: Bool)? {
     guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else {
       return nil
     }
@@ -308,59 +312,73 @@ final class AppController: NSObject, NSApplicationDelegate, WKNavigationDelegate
     return (found, occluded)
   }
 
+  private func resolveTargetHostApp() -> NSRunningApplication? {
+    let front = NSWorkspace.shared.frontmostApplication
+    // 仅当 Antigravity 或 T3 Code 处于前台时展示；切到任何其他应用/桌面立刻隐藏
+    if let f = front, let bid = f.bundleIdentifier, targetBundleIds.contains(bid) {
+      lastHostBundleId = bid
+      return f
+    }
+    // 面板展开态时（自身短暂获取焦点），保持附着在最近一次宿主窗口上
+    if isExpanded {
+      let running = NSWorkspace.shared.runningApplications
+      return running.first(where: { $0.bundleIdentifier == lastHostBundleId })
+        ?? running.first(where: { $0.bundleIdentifier.map { targetBundleIds.contains($0) } ?? false })
+    }
+    return nil
+  }
+
   private func syncWindowPlacement(force: Bool = false) {
     guard overlayVisible else {
       if panel.isVisible { panel.orderOut(nil) }
       return
     }
-    guard let hostApp = NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == "com.google.antigravity" }) else {
+
+    let primaryScreenH = NSScreen.screens.first?.frame.height ?? 900
+    guard let hostApp = resolveTargetHostApp(),
+          let winInfo = findTargetWindow(pid: hostApp.processIdentifier) else {
+      if !isExpanded && panel.isVisible {
+        panel.orderOut(nil)
+      }
+      return
+    }
+
+    if winInfo.occluded && !isExpanded {
       if panel.isVisible { panel.orderOut(nil) }
       return
     }
 
-    let size = isExpanded ? expandedSize : collapsedSize
-    let primaryScreenH = NSScreen.screens.first?.frame.height ?? 900
-
-    if let winInfo = findTargetAntigravityWindow(pid: hostApp.processIdentifier) {
-      if winInfo.occluded && !isExpanded {
-        if panel.isVisible { panel.orderOut(nil) }
-        return
-      }
-      let qRect = winInfo.rect
-      let safeMinY = qRect.minY < 20 ? 28 : qRect.minY
-      let rightX = qRect.maxX - rightMargin
-      let topY = primaryScreenH - safeMinY - topOffset
-      let nextFrame = NSRect(
-        x: max(qRect.minX + 40, rightX - size.width),
-        y: topY - size.height,
-        width: size.width,
-        height: size.height
+    let qRect = winInfo.rect
+    let size: NSSize
+    if isExpanded {
+      size = NSSize(
+        width: min(expandedSize.width, max(640, qRect.width - 28)),
+        height: min(expandedSize.height, max(520, qRect.height - 44))
       )
-      if force ||
-         abs(panel.frame.origin.x - nextFrame.origin.x) > 0.5 ||
-         abs(panel.frame.origin.y - nextFrame.origin.y) > 0.5 ||
-         abs(panel.frame.width - nextFrame.width) > 0.5 ||
-         abs(panel.frame.height - nextFrame.height) > 0.5 {
-        panel.setFrame(nextFrame, display: true)
-      }
-      if !panel.isVisible {
-        panel.orderFrontRegardless()
-      }
     } else {
-      let isFront = NSWorkspace.shared.frontmostApplication?.bundleIdentifier == "com.google.antigravity"
-      if (isFront || isExpanded), let screen = NSScreen.main {
-        let vis = screen.visibleFrame
-        let nextFrame = NSRect(
-          x: vis.maxX - rightMargin - size.width,
-          y: vis.maxY - topOffset - size.height,
-          width: size.width,
-          height: size.height
-        )
-        panel.setFrame(nextFrame, display: true)
-        if !panel.isVisible { panel.orderFrontRegardless() }
-      } else if panel.isVisible {
-        panel.orderOut(nil)
-      }
+      size = collapsedSize
+    }
+
+    let safeMinY = qRect.minY < 20 ? 28 : qRect.minY
+    // 在宿主窗口顶部水平居中展示（避免遮挡右侧 Open IDE 等按钮）
+    let centerX = qRect.midX - size.width / 2
+    let clampedX = max(qRect.minX + 12, min(qRect.maxX - size.width - 12, centerX))
+    let topY = primaryScreenH - safeMinY - (isExpanded ? 32 : 4)
+    let nextFrame = NSRect(
+      x: clampedX,
+      y: topY - size.height,
+      width: size.width,
+      height: size.height
+    )
+    if force ||
+       abs(panel.frame.origin.x - nextFrame.origin.x) > 0.5 ||
+       abs(panel.frame.origin.y - nextFrame.origin.y) > 0.5 ||
+       abs(panel.frame.width - nextFrame.width) > 0.5 ||
+       abs(panel.frame.height - nextFrame.height) > 0.5 {
+      panel.setFrame(nextFrame, display: true)
+    }
+    if !panel.isVisible {
+      panel.orderFrontRegardless()
     }
   }
 
@@ -373,7 +391,10 @@ final class AppController: NSObject, NSApplicationDelegate, WKNavigationDelegate
     if isExpanded {
       collapsePanel()
     } else {
-      NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == "com.google.antigravity" })?.activate()
+      let running = NSWorkspace.shared.runningApplications
+      let target = running.first(where: { $0.bundleIdentifier == lastHostBundleId })
+        ?? running.first(where: { $0.bundleIdentifier.map { targetBundleIds.contains($0) } ?? false })
+      target?.activate()
       webView.evaluateJavaScript("window.__ATBControl?.toggleBoard?.();", completionHandler: nil)
     }
   }

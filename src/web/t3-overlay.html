@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>本机用量与折算控制台</title>
+  <link rel="stylesheet" href="/chuanban/custom.css" />
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      background: transparent !important;
+      overflow: hidden;
+    }
+    /* 在独立 macOS 悬浮窗内，未展开时微条顶部居中贴合窗口 */
+    #ag-ledger-dock {
+      --ag-ledger-dock-top: 2px;
+      top: 2px !important;
+      left: 50% !important;
+      transform: translateX(-50%) !important;
+      max-width: calc(100vw - 8px) !important;
+    }
+    /* 彻底避免未展开时大看板占位或露出边角 */
+    #ag-ledger-board:not([data-open="1"]) {
+      display: none !important;
+    }
+    /* 展开态：隐藏顶栏微条，大看板居中充满悬浮窗 */
+    html.ag-ledger-panel-open #ag-ledger-dock {
+      display: none !important;
+    }
+    #ag-ledger-backdrop {
+      background: transparent !important;
+      backdrop-filter: none !important;
+      -webkit-backdrop-filter: none !important;
+    }
+    #ag-ledger-board[data-open="1"] {
+      display: flex !important;
+      top: 6px !important;
+      left: 50% !important;
+      right: auto !important;
+      transform: translateX(-50%) !important;
+      width: min(940px, calc(100vw - 16px)) !important;
+      max-height: calc(100vh - 14px) !important;
+    }
+  </style>
+</head>
+<body>
+  <!-- 供船板 custom.js 识别为对话页、挂载额度垫片与实时上下文指标管道 -->
+  <div id="root"></div>
+  <div id="antigravity.agentSidePanelInputBox" style="display:none">
+    <div id="ag-live-metrics-pill" data-ag-metrics-pill="1" style="display:none">
+      <span id="ag-live-metrics-text" data-ag-metrics-text="1"></span>
+    </div>
+  </div>
+
+  <script>
+    (function () {
+      'use strict';
+
+      // 每次加载悬浮窗时强制重置为收起态，防止 localStorage 残留导致小窗口截断大看板
+      try {
+        for (var k in localStorage) {
+          if (/open/i.test(k) && /ledger/i.test(k)) {
+            localStorage.removeItem(k);
+          }
+        }
+      } catch (e) {}
+
+      function postNative(name, payload) {
+        try {
+          window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers[name]
+            && window.webkit.messageHandlers[name].postMessage(payload);
+        } catch (e) {}
+      }
+
+      function fmtCompactTok(n) {
+        var v = Math.max(0, Number(n) || 0);
+        if (v === 512000 || v === 524288) return '512K';
+        if (v === 1048576) return '1024K';
+        if (v >= 1e6) return (v / 1e6).toFixed(1) + 'M';
+        if (v >= 1e3) return Math.round(v / 1e3) + 'K';
+        return String(Math.round(v));
+      }
+
+      // 将 /api/quota 的标准 JSON 转换为船板 custom.js 期望的 retrieveUserQuotaSummary 结构
+      function toProtoTime(iso) {
+        if (!iso) return null;
+        var ms = Date.parse(iso);
+        if (!Number.isFinite(ms)) return null;
+        return { seconds: Math.floor(ms / 1000) };
+      }
+
+      function toQuotaGroups(data) {
+        if (!data || !Array.isArray(data.groups)) return [];
+        var byFamily = new Map();
+        for (var i = 0; i < data.groups.length; i++) {
+          var g = data.groups[i];
+          var displayName = g.isGemini ? 'Gemini' : (g.family || 'Claude/GPT');
+          var entry = byFamily.get(displayName);
+          if (!entry) {
+            entry = { displayName: displayName, buckets: [] };
+            byFamily.set(displayName, entry);
+          }
+          var win = String(g.window || '').toLowerCase();
+          if (win !== '5h' && win !== 'weekly' && win !== 'daily') {
+            win = 'weekly';
+          }
+          entry.buckets.push({
+            window: win,
+            remaining: { case: 'remainingFraction', value: Number(g.remainingPercent || 0) / 100 },
+            resetTime: toProtoTime(g.resetTime)
+          });
+        }
+        return Array.from(byFamily.values());
+      }
+
+      var root = document.getElementById('root');
+      if (root) {
+        root.__reactContainer$t3 = {
+          memoizedProps: {
+            retrieveUserQuotaSummary: async function (force) {
+              var qs = force ? '?force=1' : '';
+              var res = await fetch('/api/quota' + qs, { cache: 'no-store' });
+              if (!res.ok) throw new Error('quota http ' + res.status);
+              var data = await res.json();
+              return { response: { groups: toQuotaGroups(data) } };
+            }
+          },
+          memoizedState: null,
+          child: null,
+          sibling: null
+        };
+      }
+
+      // 定时从 /api/snapshot 同步当前 T3 活跃会话的上下文和生成速度到隐藏指标管道，点亮顶栏微条
+      async function syncLiveMetricsPipe() {
+        try {
+          var res = await fetch('/api/snapshot', { cache: 'no-store' });
+          if (!res.ok) return;
+          var snap = await res.json();
+          var sess = snap && snap.activeSession;
+          if (!sess) return;
+          var usedLabel = fmtCompactTok(sess.contextUsed);
+          var limLabel = fmtCompactTok(sess.contextLimit || 512000);
+          var pct = Math.round(Number(sess.usedPercent || 0));
+          var tps = sess.speed && sess.speed.tokensPerSec != null ? sess.speed.tokensPerSec : null;
+          var parts = [];
+          if (tps != null) parts.push(tps + ' tok/s');
+          parts.push('Ctx ' + usedLabel + '/' + limLabel + ' (' + pct + '%)');
+          var inlineHtml = parts.join(' · ');
+
+          var pill = document.getElementById('ag-live-metrics-pill');
+          var textEl = document.getElementById('ag-live-metrics-text');
+          if (pill && textEl) {
+            pill.setAttribute('data-ag-rendered-cid', sess.conversationId || '');
+            pill.setAttribute('data-ag-cascade-id', sess.conversationId || '');
+            textEl.textContent = inlineHtml;
+            // custom.js 的 readPillElement 会跳过 style.display === 'none' 的元素，所以设为 visibility:hidden
+            pill.style.display = 'inline';
+            pill.style.visibility = 'hidden';
+            pill.style.position = 'fixed';
+            pill.style.pointerEvents = 'none';
+            pill.style.opacity = '0';
+          }
+          window.__ag_last_metrics = {
+            hasData: true,
+            inlineHtml: inlineHtml,
+            cascadeId: sess.conversationId || '',
+            tooltipHtml: ''
+          };
+        } catch (e) {}
+      }
+      void syncLiveMetricsPipe();
+      setInterval(syncLiveMetricsPipe, 1500);
+
+      // 监听展开/收起状态，同步给 macOS 原生 NSPanel 改变窗口尺寸
+      var lastOpen = false;
+      function syncOpenState() {
+        var open = document.documentElement.classList.contains('ag-ledger-panel-open');
+        if (open !== lastOpen) {
+          lastOpen = open;
+          postNative('agPanelState', { open: open });
+        }
+      }
+      new MutationObserver(syncOpenState).observe(document.documentElement, {
+        attributes: true,
+        attributeFilter: ['class']
+      });
+
+      // 监听微条实际宽高，通知原生宿主精确裁剪窗口宽度
+      function reportDockSize() {
+        var dock = document.getElementById('ag-ledger-dock');
+        if (!dock || lastOpen) return;
+        var rect = dock.getBoundingClientRect();
+        if (rect.width > 60) {
+          postNative('agBarWidth', { width: Math.ceil(rect.width) + 12, height: Math.ceil(rect.height) + 8 });
+        }
+      }
+      setInterval(reportDockSize, 600);
+
+      // 提供给原生菜单栏与失焦收起钩子（派发 Escape 键直接触发 custom.js 的 setBoardOpen(false)）
+      window.__ATBControl = {
+        closeBoard: function () {
+          if (document.documentElement.classList.contains('ag-ledger-panel-open')) {
+            window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+          }
+        },
+        toggleBoard: function () {
+          if (document.documentElement.classList.contains('ag-ledger-panel-open')) {
+            window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+          } else {
+            var dock = document.getElementById('ag-ledger-dock');
+            if (dock) dock.click();
+          }
+        }
+      };
+    })();
+  </script>
+  <script src="/chuanban/custom.js"></script>
+</body>
+</html>

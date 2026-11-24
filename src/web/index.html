@@ -25,6 +25,11 @@
       <span id="tb-strip-ctx">--%</span>
     </button>
 
+    <button id="tb-btn-quota" class="tb-pill-btn tb-pill-quota" type="button" title="Gemini 剩余限额与重置倒计时">
+      <span class="tb-ico" aria-hidden="true">✦</span>
+      <span id="tb-strip-quota">G --%</span>
+    </button>
+
     <button id="tb-btn-speed" class="tb-pill-btn" type="button" title="最新模型生成速度与耗时">
       <span class="tb-ico" aria-hidden="true">⚡</span>
       <span id="tb-strip-speed">-- tok/s</span>
@@ -126,6 +131,20 @@
           </div>
         </div>
         <div id="tb-spd-note" class="tb-card-foot">等待模型输出后自动计算速度与耗时…</div>
+      </div>
+    </section>
+
+    <!-- Gemini 与模型限额卡片 -->
+    <section class="tb-card tb-quota-card">
+      <div class="tb-card-head">
+        <div class="tb-cost-title-wrap">
+          <span class="tb-card-title">✦ Gemini 与模型限额</span>
+          <span id="tb-quota-badge" class="tb-status-pill" data-tone="muted">读取中</span>
+        </div>
+        <button id="tb-btn-quota-refresh" class="tb-action-pill" type="button" title="立即重新查询官方限额">刷新限额</button>
+      </div>
+      <div id="tb-quota-grid" class="tb-quota-grid">
+        <div class="tb-quota-empty">正在读取官方限额信息…</div>
       </div>
     </section>
 

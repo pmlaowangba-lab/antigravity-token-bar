@@ -117,7 +117,8 @@ function parseConversationLog(filePath, convId, mtimeMs) {
           if (tsMs > lastUserExplicitMs) lastUserExplicitMs = tsMs;
         }
         if (!firstTitle) {
-          const reqMatch = obj.content.match(USER_REQUEST_REGEX);
+          const innerReqMatch = obj.content.match(/<user_request>([\s\S]*?)<\/user_request>/);
+          const reqMatch = innerReqMatch || obj.content.match(USER_REQUEST_REGEX);
           const candidate = cleanUserTitle(reqMatch ? reqMatch[1] : obj.content);
           if (candidate) firstTitle = candidate;
         }
@@ -238,6 +239,50 @@ function parseConversationLog(filePath, convId, mtimeMs) {
       todayUSD: Math.round(sumUSDToday * 10000) / 10000
     }
   };
+}
+
+function eventsToBuckets(events, convIdFilter) {
+  const buckets = {};
+  const want = convIdFilter ? String(convIdFilter).trim().toLowerCase() : '';
+  for (const ev of events || []) {
+    if (ev.estimated) continue;
+    if (want && String(ev.convId || '').trim().toLowerCase() !== want) continue;
+    addStepIntoBuckets(buckets, {
+      convId: ev.convId,
+      dateStr: ev.date,
+      modelKey: ev.model,
+      modelLabel: ev.model,
+      inputTokens: ev.input,
+      cacheTokens: ev.cacheRead,
+      outputTokens: (ev.thinking || 0) + (ev.output || 0)
+    });
+  }
+  return buckets;
+}
+
+function mergePreciseSessionTotals(sessionView, usageIndex, convId, todayDate, fxCny) {
+  if (!usageIndex || !convId || !sessionView) return sessionView;
+  const opts = { todayDate, fxCny, convId };
+  const todayP = aggregateUsage(usageIndex, { ...opts, range: 'today' });
+  const allP = aggregateUsage(usageIndex, { ...opts, range: 'all' });
+  if (!allP && !todayP) return sessionView;
+  const base = sessionView.sessionTotals || {};
+  const prompt = (allP?.inputTokens || 0) + (allP?.cacheReadTokens || 0);
+  sessionView.sessionTotals = {
+    turns: base.turns,
+    calls: allP?.responses ?? base.calls,
+    inputTokens: allP?.inputTokens ?? base.inputTokens,
+    cacheTokens: allP?.cacheReadTokens ?? base.cacheTokens,
+    cacheHitRate:
+      prompt > 0
+        ? Number((((allP?.cacheReadTokens || 0) / prompt) * 100).toFixed(1))
+        : base.cacheHitRate,
+    outputTokens: (allP?.thinkingTokens || 0) + (allP?.outputTokens || 0) || base.outputTokens,
+    totalUSD: pricing.roundMoney(allP?.cost?.totalUSD ?? base.totalUSD),
+    todayUSD: pricing.roundMoney(todayP?.cost?.totalUSD ?? 0),
+    fromPrecise: true
+  };
+  return sessionView;
 }
 
 function addStepIntoBuckets(bucketsMap, step) {
@@ -388,6 +433,8 @@ function buildActiveSessionView(parsedConv) {
   return {
     conversationId: parsedConv.convId,
     title: parsedConv.title,
+    source: parsedConv.source || 'Antigravity',
+    sourceTag: parsedConv.sourceTag || 'AG',
     modelLabel: last.modelLabel,
     contextUsed,
     contextLimit,
@@ -404,9 +451,31 @@ function buildActiveSessionView(parsedConv) {
   };
 }
 
+function discoverDefaultBrainSources(home) {
+  const sources = [
+    { dir: path.join(home, '.gemini', 'antigravity', 'brain'), source: 'Antigravity', sourceTag: 'AG' }
+  ];
+  const t3Root = path.join(home, '.t3', 'userdata', 'providers', 'antigravity');
+  try {
+    if (fs.existsSync(t3Root)) {
+      for (const ent of fs.readdirSync(t3Root, { withFileTypes: true })) {
+        if (!ent.isDirectory()) continue;
+        const brainDir = path.join(t3Root, ent.name, 'antigravity-acp', 'brain');
+        if (fs.existsSync(brainDir)) {
+          sources.push({ dir: brainDir, source: 'T3 Code', sourceTag: 'T3' });
+        }
+      }
+    }
+  } catch {
+    // 忽略目录访问异常
+  }
+  return sources;
+}
+
 function createLogScanner(options = {}) {
   const home = os.homedir();
-  const brainRootDir = options.brainRootDir || path.join(home, '.gemini', 'antigravity', 'brain');
+  const explicitBrainRoot = options.brainRootDir || null;
+  const explicitBrainSources = Array.isArray(options.brainSources) ? options.brainSources : null;
   const conversationsDir = options.conversationsDir !== undefined
     ? options.conversationsDir
     : (options.brainRootDir ? null : path.join(home, '.gemini', 'antigravity', 'conversations'));
@@ -417,24 +486,42 @@ function createLogScanner(options = {}) {
   const fileCache = new Map();
 
   function listConversationTranscripts() {
-    if (!fs.existsSync(brainRootDir)) return [];
+    const sources = explicitBrainSources
+      ? explicitBrainSources
+      : explicitBrainRoot
+        ? [{ dir: explicitBrainRoot, source: 'Antigravity', sourceTag: 'AG' }]
+        : discoverDefaultBrainSources(home);
+
     const results = [];
-    let entries = [];
-    try {
-      entries = fs.readdirSync(brainRootDir, { withFileTypes: true });
-    } catch {
-      return [];
-    }
-    for (const ent of entries) {
-      if (!ent.isDirectory() || !UUID_PATTERN.test(ent.name)) continue;
-      const logPath = path.join(brainRootDir, ent.name, '.system_generated', 'logs', 'transcript.jsonl');
+    const seenConvPaths = new Set();
+    for (const src of sources) {
+      if (!src || !src.dir || !fs.existsSync(src.dir)) continue;
+      let entries = [];
       try {
-        const st = fs.statSync(logPath);
-        if (st.isFile() && st.size > 0) {
-          results.push({ convId: ent.name, logPath, mtimeMs: st.mtimeMs, size: st.size });
-        }
+        entries = fs.readdirSync(src.dir, { withFileTypes: true });
       } catch {
-        // 忽略无日志目录
+        continue;
+      }
+      for (const ent of entries) {
+        if (!ent.isDirectory() || !UUID_PATTERN.test(ent.name)) continue;
+        const logPath = path.join(src.dir, ent.name, '.system_generated', 'logs', 'transcript.jsonl');
+        if (seenConvPaths.has(logPath)) continue;
+        try {
+          const st = fs.statSync(logPath);
+          if (st.isFile() && st.size > 0) {
+            seenConvPaths.add(logPath);
+            results.push({
+              convId: ent.name,
+              logPath,
+              mtimeMs: st.mtimeMs,
+              size: st.size,
+              source: src.source || 'Antigravity',
+              sourceTag: src.sourceTag || 'AG'
+            });
+          }
+        } catch {
+          // 忽略无日志目录
+        }
       }
     }
     return results;
@@ -457,6 +544,8 @@ function createLogScanner(options = {}) {
       } else {
         try {
           parsed = parseConversationLog(f.logPath, f.convId, f.mtimeMs);
+          parsed.source = f.source || 'Antigravity';
+          parsed.sourceTag = f.sourceTag || 'AG';
           fileCache.set(f.logPath, { mtimeMs: f.mtimeMs, size: f.size, parsed });
         } catch {
           continue;
@@ -478,7 +567,19 @@ function createLogScanner(options = {}) {
     parsedList.sort((a, b) => (b.lastUserExplicitMs - a.lastUserExplicitMs) || (b.lastRealActivityMs - a.lastRealActivityMs));
 
     const requestedConvId = typeof query.convId === 'string' && query.convId.trim() ? query.convId.trim() : null;
-    const targetParsed = (requestedConvId && parsedList.find(p => p.convId === requestedConvId)) || parsedList[0] || null;
+    const normConvId = (id) => String(id || '').trim().toLowerCase();
+    let targetParsed = null;
+    if (requestedConvId) {
+      const hit = parsedList.find((p) => normConvId(p.convId) === normConvId(requestedConvId));
+      targetParsed = hit || {
+        convId: requestedConvId,
+        title: `会话 ${requestedConvId.slice(0, 8)}`,
+        steps: [],
+        latestModel: 'Gemini 4 Carbon'
+      };
+    } else {
+      targetParsed = parsedList[0] || null;
+    }
 
     const recentSessions = parsedList.slice(0, 12).map(p => {
       const last = p.steps[p.steps.length - 1];
@@ -488,6 +589,8 @@ function createLogScanner(options = {}) {
       return {
         conversationId: p.convId,
         title: p.title,
+        source: p.source || 'Antigravity',
+        sourceTag: p.sourceTag || 'AG',
         modelLabel: last?.modelLabel || p.latestModel,
         contextUsed: used,
         contextLimit: lim,
@@ -497,10 +600,8 @@ function createLogScanner(options = {}) {
       };
     });
 
-    const activeBuckets = {};
-    if (targetParsed) {
-      for (const step of targetParsed.steps) addStepIntoBuckets(activeBuckets, step);
-    }
+    let activeBuckets = {};
+    const activeConvId = targetParsed?.convId || null;
 
     const todayDate = pricing.formatLocalDate(new Date());
     const sinceLocalStr = pricing.formatLocalDate(new Date(sinceMs || Date.now()));
@@ -525,6 +626,45 @@ function createLogScanner(options = {}) {
     const machineFilter = query.machine || '';
     const precise = usageIndex ? preciseBuckets(usageIndex, todayDate, { machine: machineFilter }) : null;
 
+    if (usageIndex && activeConvId) {
+      activeBuckets = eventsToBuckets(usageIndex.events, activeConvId);
+    } else if (targetParsed) {
+      for (const step of targetParsed.steps) addStepIntoBuckets(activeBuckets, step);
+    }
+
+    const activePreciseLedger =
+      usageIndex && activeConvId
+        ? {
+            today: aggregateUsage(usageIndex, { todayDate, range: 'today', convId: activeConvId, machine: machineFilter, fxCny }),
+            month: aggregateUsage(usageIndex, { todayDate, range: 'month', convId: activeConvId, machine: machineFilter, fxCny }),
+            year: aggregateUsage(usageIndex, { todayDate, range: 'year', convId: activeConvId, machine: machineFilter, fxCny }),
+            allTime: aggregateUsage(usageIndex, { todayDate, range: 'all', convId: activeConvId, machine: machineFilter, fxCny })
+          }
+        : null;
+
+    const activePreciseView =
+      usageIndex && activeConvId
+        ? aggregateUsage(usageIndex, {
+            todayDate,
+            range: query.range || 'today',
+            grain: query.grain || 'day',
+            model: query.model || '',
+            workspace: query.workspace || '',
+            category: query.category || '',
+            convId: activeConvId,
+            machine: machineFilter,
+            fxCny
+          })
+        : null;
+
+    const activeSession = mergePreciseSessionTotals(
+      buildActiveSessionView(targetParsed),
+      usageIndex,
+      activeConvId,
+      todayDate,
+      fxCny
+    );
+
     return {
       ok: true,
       scannedAt: new Date().toISOString(),
@@ -533,7 +673,9 @@ function createLogScanner(options = {}) {
       fxCny,
       selectedConvId: requestedConvId || null,
       recentSessions,
-      activeSession: buildActiveSessionView(targetParsed),
+      activeSession,
+      activePreciseView,
+      activePreciseLedger,
       activeLedger: pricing.summarizeBuckets(activeBuckets, { todayDate, fxCny }),
       activeHeatmap: pricing.buildHeatmapGrid(activeBuckets, { endDate: todayDate, weeks: 52, fxCny }),
       freshLedger: pricing.summarizeBuckets(freshBuckets, { todayDate, fxCny }),

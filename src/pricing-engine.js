@@ -411,5 +411,6 @@ module.exports = {
   calcStepCost,
   summarizeBuckets,
   buildHeatmapGrid,
-  formatLocalDate
+  formatLocalDate,
+  roundMoney
 };

@@ -56,7 +56,7 @@
     state.boardOpen = Boolean(open);
     const board = document.getElementById('tb-board');
     if (board) board.hidden = !state.boardOpen;
-    for (const id of ['tb-btn-ctx', 'tb-btn-speed', 'tb-btn-cache', 'tb-btn-tokens', 'tb-btn-cost']) {
+    for (const id of ['tb-btn-ctx', 'tb-btn-quota', 'tb-btn-speed', 'tb-btn-cache', 'tb-btn-tokens', 'tb-btn-cost']) {
       document.getElementById(id)?.setAttribute('aria-expanded', String(state.boardOpen));
     }
     postNative('agPanelState', { open: state.boardOpen });
@@ -136,6 +136,81 @@
     }
   }
 
+  function renderQuota(quota) {
+    const stripBtn = document.getElementById('tb-btn-quota');
+    const stripVal = document.getElementById('tb-strip-quota');
+    const badge = document.getElementById('tb-quota-badge');
+    const grid = document.getElementById('tb-quota-grid');
+    if (!stripBtn || !stripVal || !badge || !grid) return;
+
+    if (!quota || quota.loading) {
+      stripVal.textContent = 'G …';
+      stripBtn.setAttribute('data-tone', 'muted');
+      stripBtn.title = '正在读取 Gemini 官方限额…';
+      badge.textContent = '读取中';
+      badge.setAttribute('data-tone', 'muted');
+      return;
+    }
+
+    const g = quota.gemini;
+    if (g && g.remainingPercent != null) {
+      stripVal.textContent = `G ${g.remainingPercent}%`;
+      stripBtn.setAttribute('data-tone', g.tone || 'good');
+      const groupLines = (quota.groups || []).map(item =>
+        `${item.label}：剩余 ${item.remainingPercent}%${item.resetInText ? `（${item.resetInText}后重置）` : ''}`
+      );
+      stripBtn.title = groupLines.length ? groupLines.join('\n') : `Gemini 剩余限额 ${g.remainingPercent}%`;
+      badge.textContent = g.resetInText ? `余 ${g.remainingPercent}% · ${g.resetInText}后重置` : `余 ${g.remainingPercent}%`;
+      badge.setAttribute('data-tone', g.tone || 'good');
+    } else {
+      stripVal.textContent = 'G --%';
+      stripBtn.setAttribute('data-tone', 'muted');
+      stripBtn.title = quota.error || '暂未获取到 Gemini 限额';
+      badge.textContent = quota.error ? '暂不可用' : '无数据';
+      badge.setAttribute('data-tone', 'muted');
+    }
+
+    grid.innerHTML = '';
+    const groups = Array.isArray(quota.groups) ? quota.groups : [];
+    if (groups.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'tb-quota-empty';
+      empty.textContent = quota.error || '未检测到可用限额分组，请确认本机已用 Google 登录 Antigravity。';
+      grid.appendChild(empty);
+      return;
+    }
+
+    for (const item of groups) {
+      const box = document.createElement('div');
+      box.className = 'tb-quota-item';
+      const head = document.createElement('div');
+      head.className = 'tb-quota-item-head';
+      const nameEl = document.createElement('span');
+      nameEl.className = 'tb-quota-name';
+      nameEl.textContent = item.label;
+      const pctEl = document.createElement('span');
+      pctEl.className = 'tb-quota-pct';
+      pctEl.setAttribute('data-tone', item.tone || 'good');
+      pctEl.textContent = `${item.remainingPercent}%`;
+      head.append(nameEl, pctEl);
+
+      const track = document.createElement('div');
+      track.className = 'tb-quota-bar-track';
+      const fill = document.createElement('div');
+      fill.className = 'tb-quota-bar-fill';
+      fill.setAttribute('data-tone', item.tone || 'good');
+      fill.style.width = `${Math.max(0, Math.min(100, item.remainingPercent))}%`;
+      track.appendChild(fill);
+
+      const meta = document.createElement('div');
+      meta.className = 'tb-quota-meta';
+      meta.textContent = item.resetInText ? `重置倒计时：${item.resetInText}` : '实时共享额度池';
+
+      box.append(head, track, meta);
+      grid.appendChild(box);
+    }
+  }
+
   function render() {
     const snap = state.snapshot;
     if (!snap) return;
@@ -149,8 +224,10 @@
 
     // 1. 顶部指标条
     renderRing(sess.usedPercent, sess.healthTone);
+    const srcPrefix = sess.sourceTag ? `[${sess.sourceTag}] ` : '';
     document.getElementById('tb-strip-ctx').textContent = `${Math.round(sess.usedPercent)}%`;
-    document.getElementById('tb-btn-ctx').title = `上下文窗口：已用 ${fmtTokens(sess.contextUsed)} / 上限 ${fmtTokens(sess.contextLimit)} (${sess.usedPercent}%)`;
+    document.getElementById('tb-btn-ctx').title = `${srcPrefix}${sess.title || '当前会话'}\n上下文窗口：已用 ${fmtTokens(sess.contextUsed)} / 上限 ${fmtTokens(sess.contextLimit)} (${sess.usedPercent}%)`;
+    renderQuota(snap.quota);
 
     document.getElementById('tb-strip-speed').textContent = sess.speed.tokensPerSec != null ? `${sess.speed.tokensPerSec} tok/s` : '-- tok/s';
     document.getElementById('tb-btn-speed').title = sess.speed.note;
@@ -178,7 +255,8 @@
       for (const item of snap.recentSessions) {
         const opt = document.createElement('option');
         opt.value = item.conversationId;
-        opt.textContent = `📌 ${item.title} (${fmtTokens(item.contextUsed)} · ${item.usedPercent}%)`;
+        const tag = item.sourceTag ? `[${item.sourceTag}] ` : '';
+        opt.textContent = `📌 ${tag}${item.title} (${fmtTokens(item.contextUsed)} · ${item.usedPercent}%)`;
         sel.appendChild(opt);
       }
       sel.value = Array.from(sel.options).some(o => o.value === prevVal) ? prevVal : '';
@@ -300,12 +378,29 @@
     void refreshSnapshot();
   });
 
-  // 事件绑定：顶栏五个按钮全部统一开关同一个大看板（不再拆出杂乱小弹窗）
-  for (const id of ['tb-btn-ctx', 'tb-btn-speed', 'tb-btn-cache', 'tb-btn-tokens', 'tb-btn-cost']) {
+  // 事件绑定：顶栏按钮全部统一开关同一个大看板（不再拆出杂乱小弹窗）
+  for (const id of ['tb-btn-ctx', 'tb-btn-quota', 'tb-btn-speed', 'tb-btn-cache', 'tb-btn-tokens', 'tb-btn-cost']) {
     document.getElementById(id)?.addEventListener('click', () => {
       syncBoardOpen(!state.boardOpen);
     });
   }
+
+  document.getElementById('tb-btn-quota-refresh')?.addEventListener('click', async () => {
+    const btn = document.getElementById('tb-btn-quota-refresh');
+    if (btn) btn.textContent = '刷新中…';
+    try {
+      const res = await fetch('/api/quota?force=1', { cache: 'no-store' });
+      if (res.ok) {
+        const q = await res.json();
+        if (state.snapshot) {
+          state.snapshot.quota = q;
+          render();
+        }
+      }
+    } finally {
+      if (btn) btn.textContent = '刷新限额';
+    }
+  });
 
   document.getElementById('tb-btn-cost')?.addEventListener('contextmenu', e => {
     e.preventDefault();

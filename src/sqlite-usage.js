@@ -383,6 +383,10 @@ function weekStart(date) {
   return `${y}-${m}-${dd}`;
 }
 
+function normConvId(id) {
+  return String(id || '').trim().toLowerCase();
+}
+
 function aggregateUsage(index, options = {}) {
   if (!index) return null;
   const today = options.todayDate;
@@ -392,6 +396,7 @@ function aggregateUsage(index, options = {}) {
   const workspace = options.workspace || '';
   const category = options.category || '';
   const machine = options.machine || '';
+  const convId = options.convId ? normConvId(options.convId) : '';
   const sessions = new Set();
   const days = new Map();
   const fxCny = Number(options.fxCny) > 0 ? Number(options.fxCny) : pricing.DEFAULT_FX_CNY;
@@ -407,6 +412,7 @@ function aggregateUsage(index, options = {}) {
   let savedUSD = 0;
   for (const ev of index.events) {
     if (!inRange(ev.date, range, today)) continue;
+    if (convId && normConvId(ev.convId) !== convId) continue;
     if (model && ev.model !== model) continue;
     if (workspace && ev.workspace !== workspace) continue;
     if (category && ev.category !== category) continue;
