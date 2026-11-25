@@ -25,39 +25,48 @@ function sanitizeLabel(raw, fallback) {
  */
 function detectVaultAndMachine(repoRoot) {
   const root = repoRoot || path.resolve(__dirname, '..');
-  const vaultParent = path.resolve(root, '..', '..', '..');
+  const candidateParents = [path.resolve(root, '..', '..', '..')];
+  if (!repoRoot) {
+    const home = os.homedir();
+    for (const extra of [path.join(home, 'Public'), home]) {
+      if (!candidateParents.includes(extra)) candidateParents.push(extra);
+    }
+  }
   let matchedVault = '';
   let detectedMachine = '';
 
-  try {
-    const entries = fs.readdirSync(vaultParent, { withFileTypes: true });
-    for (const ent of entries) {
-      if (!ent.isDirectory() || ent.name === 'laowang-local') continue;
-      const candidate = path.join(vaultParent, ent.name);
-      const hasTools = fs.existsSync(path.join(candidate, '04-素材工具'));
-      const hasProfiles = fs.existsSync(path.join(candidate, 'machine-profiles.json'));
-      if (hasTools && (hasProfiles || fs.existsSync(path.join(candidate, 'AGENTS.md')))) {
-        matchedVault = candidate;
-        if (hasProfiles) {
-          try {
-            const prof = JSON.parse(fs.readFileSync(path.join(candidate, 'machine-profiles.json'), 'utf8'));
-            const profiles = (prof && prof.profiles) || {};
-            for (const [key, item] of Object.entries(profiles)) {
-              if (!item || typeof item !== 'object') continue;
-              if (item.obsidianVaultName === ent.name || path.resolve(item.vaultPath || '') === path.resolve(candidate)) {
-                detectedMachine = key;
-                break;
+  for (const vaultParent of candidateParents) {
+    if (matchedVault) break;
+    try {
+      const entries = fs.readdirSync(vaultParent, { withFileTypes: true });
+      for (const ent of entries) {
+        if (!ent.isDirectory() || ent.name === 'laowang-local') continue;
+        const candidate = path.join(vaultParent, ent.name);
+        const hasTools = fs.existsSync(path.join(candidate, '04-素材工具'));
+        const hasProfiles = fs.existsSync(path.join(candidate, 'machine-profiles.json'));
+        if (hasTools && (hasProfiles || fs.existsSync(path.join(candidate, 'AGENTS.md')))) {
+          matchedVault = candidate;
+          if (hasProfiles) {
+            try {
+              const prof = JSON.parse(fs.readFileSync(path.join(candidate, 'machine-profiles.json'), 'utf8'));
+              const profiles = (prof && prof.profiles) || {};
+              for (const [key, item] of Object.entries(profiles)) {
+                if (!item || typeof item !== 'object') continue;
+                if (item.obsidianVaultName === ent.name || path.resolve(item.vaultPath || '') === path.resolve(candidate)) {
+                  detectedMachine = key;
+                  break;
+                }
               }
+            } catch {
+              // 忽略 profile 解析失败
             }
-          } catch {
-            // 忽略 profile 解析失败
           }
+          break;
         }
-        break;
       }
+    } catch {
+      // 忽略目录扫描异常
     }
-  } catch {
-    // 忽略目录扫描异常
   }
 
   const envDir = process.env.ATB_SHARED_LEDGER_DIR ? path.resolve(process.env.ATB_SHARED_LEDGER_DIR) : '';

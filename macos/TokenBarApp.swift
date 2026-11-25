@@ -12,12 +12,14 @@ final class FloatingBarPanel: NSPanel {
 @MainActor
 final class WebBridge: NSObject, WKScriptMessageHandler {
   weak var owner: AppController?
+  var windowId: CGWindowID = 0
+
   func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
     guard let body = message.body as? [String: Any] else { return }
     switch message.name {
     case "agPanelState":
       let open = (body["open"] as? Bool) ?? false
-      owner?.setExpanded(open)
+      owner?.setExpanded(open, for: windowId)
     case "agDrag":
       let dx = (body["dx"] as? NSNumber)?.doubleValue ?? 0
       let dy = (body["dy"] as? NSNumber)?.doubleValue ?? 0
@@ -35,6 +37,63 @@ final class WebBridge: NSObject, WKScriptMessageHandler {
 }
 
 @MainActor
+final class OverlaySlot {
+  let windowId: CGWindowID
+  let panel: FloatingBarPanel
+  let webView: WKWebView
+  let bridge: WebBridge
+
+  init(windowId: CGWindowID, owner: AppController, collapsedSize: NSSize, navDelegate: WKNavigationDelegate, url: URL?) {
+    self.windowId = windowId
+    self.bridge = WebBridge()
+    self.bridge.owner = owner
+    self.bridge.windowId = windowId
+
+    let panel = FloatingBarPanel(
+      contentRect: NSRect(origin: NSPoint(x: 300, y: 800), size: collapsedSize),
+      styleMask: [.borderless, .nonactivatingPanel],
+      backing: .buffered,
+      defer: false
+    )
+    panel.isOpaque = false
+    panel.backgroundColor = .clear
+    panel.hasShadow = false
+    // 使用 .floating 层级：贴合 Antigravity 窗口上方，不遮挡系统通知横幅
+    panel.level = .floating
+    panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
+
+    let ucc = WKUserContentController()
+    ucc.add(self.bridge, name: "agPanelState")
+    ucc.add(self.bridge, name: "agDrag")
+    ucc.add(self.bridge, name: "agBarWidth")
+
+    let cfg = WKWebViewConfiguration()
+    cfg.userContentController = ucc
+
+    let webView = WKWebView(frame: NSRect(origin: .zero, size: collapsedSize), configuration: cfg)
+    webView.navigationDelegate = navDelegate
+    webView.setValue(false, forKey: "drawsBackground")
+    webView.autoresizingMask = [.width, .height]
+    panel.contentView = webView
+
+    self.panel = panel
+    self.webView = webView
+
+    if let url {
+      webView.load(URLRequest(url: url))
+    }
+  }
+
+  func destroy() {
+    panel.orderOut(nil)
+    webView.configuration.userContentController.removeScriptMessageHandler(forName: "agPanelState")
+    webView.configuration.userContentController.removeScriptMessageHandler(forName: "agDrag")
+    webView.configuration.userContentController.removeScriptMessageHandler(forName: "agBarWidth")
+    panel.close()
+  }
+}
+
+@MainActor
 final class AppController: NSObject, NSApplicationDelegate, WKNavigationDelegate {
   private let port: Int = {
     if let raw = ProcessInfo.processInfo.environment["ATB_PORT"], let p = Int(raw), p > 0 {
@@ -45,18 +104,16 @@ final class AppController: NSObject, NSApplicationDelegate, WKNavigationDelegate
 
   private var backendProcess: Process?
   private var statusItem: NSStatusItem!
-  private var panel: FloatingBarPanel!
-  private var webView: WKWebView!
-  private let bridge = WebBridge()
+  private var slots: [CGWindowID: OverlaySlot] = [:]
+  private var expandedWindowId: CGWindowID? = nil
+  private var serverReady = false
 
   private var windowTimer: Timer?
   private var summaryTimer: Timer?
-  private var isExpanded = false
   private var overlayVisible = true
 
-  // 仅在 Antigravity 或 T3 Code 窗口处于前台时展示，其他应用与桌面自动隐藏
-  private let targetBundleIds: Set<String> = ["com.google.antigravity", "com.t3tools.t3code"]
-  private var lastHostBundleId: String = "com.google.antigravity"
+  // 严格只展示在 Antigravity 窗口上，其他任何应用与桌面不展示
+  private let targetBundleId = "com.google.antigravity"
 
   private var collapsedSize = NSSize(width: 460, height: 34)
   private let expandedSize = NSSize(width: 960, height: 790)
@@ -74,15 +131,26 @@ final class AppController: NSObject, NSApplicationDelegate, WKNavigationDelegate
   private var dragOriginRight: CGFloat?
   private var dragOriginTop: CGFloat?
 
+  private var overlayURL: URL? {
+    URL(string: "http://127.0.0.1:\(port)/t3-overlay.html")
+  }
+
   func applicationDidFinishLaunching(_ notification: Notification) {
     NSApp.setActivationPolicy(.accessory)
-    bridge.owner = self
 
     setupStatusMenu()
-    setupFloatingPanel()
     ensureServerAndLoad()
 
-    windowTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
+    // 监听 Antigravity 启动/激活，打开客户端立刻响应展示
+    let wsCenter = NSWorkspace.shared.notificationCenter
+    wsCenter.addObserver(forName: NSWorkspace.didLaunchApplicationNotification, object: nil, queue: .main) { [weak self] _ in
+      Task { @MainActor in self?.syncWindowPlacement(force: true) }
+    }
+    wsCenter.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { [weak self] _ in
+      Task { @MainActor in self?.syncWindowPlacement(force: true) }
+    }
+
+    windowTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
       Task { @MainActor in self?.syncWindowPlacement() }
     }
     summaryTimer = Timer.scheduledTimer(withTimeInterval: 3.5, repeats: true) { [weak self] _ in
@@ -91,20 +159,25 @@ final class AppController: NSObject, NSApplicationDelegate, WKNavigationDelegate
   }
 
   func applicationDidResignActive(_ notification: Notification) {
-    if isExpanded {
+    if expandedWindowId != nil {
       collapsePanel()
     }
   }
 
   func applicationWillTerminate(_ notification: Notification) {
+    for slot in slots.values {
+      slot.destroy()
+    }
+    slots.removeAll()
     if let proc = backendProcess, proc.isRunning {
       proc.terminate()
     }
   }
 
   func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
-    DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
-      self?.loadOverlayPage()
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self, weak webView] in
+      guard let self, let webView, let url = self.overlayURL else { return }
+      webView.load(URLRequest(url: url))
     }
   }
 
@@ -113,21 +186,34 @@ final class AppController: NSObject, NSApplicationDelegate, WKNavigationDelegate
     let clampedH = min(52, max(28, nextHeight))
     if abs(collapsedSize.width - clampedW) > 2 || abs(collapsedSize.height - clampedH) > 2 {
       collapsedSize = NSSize(width: clampedW, height: clampedH)
-      if !isExpanded {
+      if expandedWindowId == nil {
         syncWindowPlacement(force: true)
       }
     }
   }
 
-  func setExpanded(_ open: Bool) {
-    guard isExpanded != open else { return }
-    isExpanded = open
-    panel.allowKey = open
-    panel.hasShadow = false
-    syncWindowPlacement(force: true)
+  func setExpanded(_ open: Bool, for windowId: CGWindowID) {
     if open {
-      NSApp.activate(ignoringOtherApps: true)
-      panel.makeKeyAndOrderFront(nil)
+      // 如果已有其他窗口展开，先收起它
+      if let prevId = expandedWindowId, prevId != windowId, let prevSlot = slots[prevId] {
+        prevSlot.webView.evaluateJavaScript("window.__ATBControl?.closeBoard?.();", completionHandler: nil)
+        prevSlot.panel.allowKey = false
+      }
+      expandedWindowId = windowId
+      if let slot = slots[windowId] {
+        slot.panel.allowKey = true
+        slot.panel.hasShadow = false
+        syncWindowPlacement(force: true)
+        NSApp.activate(ignoringOtherApps: true)
+        slot.panel.makeKeyAndOrderFront(nil)
+      }
+    } else if expandedWindowId == windowId {
+      expandedWindowId = nil
+      if let slot = slots[windowId] {
+        slot.panel.allowKey = false
+        slot.panel.hasShadow = false
+      }
+      syncWindowPlacement(force: true)
     }
   }
 
@@ -157,58 +243,31 @@ final class AppController: NSObject, NSApplicationDelegate, WKNavigationDelegate
     }
 
     let menu = NSMenu()
-    let toggleItem = NSMenuItem(title: "展开 / 收起用量大看板", action: #selector(toggleBoardFromMenu), keyEquivalent: "t")
-    toggleItem.target = self
-    menu.addItem(toggleItem)
 
-    let browserItem = NSMenuItem(title: "在浏览器打开独立全屏看板", action: #selector(openBrowserDashboard), keyEquivalent: "o")
+    let toggleBoardItem = NSMenuItem(title: "展开 / 收起 Token 看板", action: #selector(toggleBoardFromMenu), keyEquivalent: "t")
+    toggleBoardItem.target = self
+    menu.addItem(toggleBoardItem)
+
+    let browserItem = NSMenuItem(title: "在浏览器打开完整看板 (19825)", action: #selector(openBrowserDashboard), keyEquivalent: "o")
     browserItem.target = self
     menu.addItem(browserItem)
 
-    let showBarItem = NSMenuItem(title: "在 Antigravity / T3 Code 顶栏显示指标条", action: #selector(toggleBarVisibility(_:)), keyEquivalent: "")
+    let showBarItem = NSMenuItem(title: "在 Antigravity 顶栏显示指标条", action: #selector(toggleBarVisibility(_:)), keyEquivalent: "")
     showBarItem.target = self
     showBarItem.state = .on
     menu.addItem(showBarItem)
 
-    let resetPosItem = NSMenuItem(title: "重置顶栏贴顶位置", action: #selector(resetBarPosition), keyEquivalent: "r")
+    let resetPosItem = NSMenuItem(title: "重置指标条默认位置", action: #selector(resetBarPosition), keyEquivalent: "")
     resetPosItem.target = self
     menu.addItem(resetPosItem)
 
     menu.addItem(NSMenuItem.separator())
-    let quitItem = NSMenuItem(title: "退出 Antigravity Token Bar", action: #selector(quitApp), keyEquivalent: "q")
+
+    let quitItem = NSMenuItem(title: "退出 Token 看板", action: #selector(quitApp), keyEquivalent: "q")
     quitItem.target = self
     menu.addItem(quitItem)
 
     statusItem.menu = menu
-  }
-
-  private func setupFloatingPanel() {
-    panel = FloatingBarPanel(
-      contentRect: NSRect(origin: NSPoint(x: 300, y: 800), size: collapsedSize),
-      styleMask: [.borderless, .nonactivatingPanel],
-      backing: .buffered,
-      defer: false
-    )
-    panel.isOpaque = false
-    panel.backgroundColor = .clear
-    panel.hasShadow = false
-    // 使用 .floating 层级：稳固贴合应用窗口上方，同时低于 macOS 系统通知横幅，绝不遮挡微信/系统通知
-    panel.level = .floating
-    panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
-
-    let ucc = WKUserContentController()
-    ucc.add(bridge, name: "agPanelState")
-    ucc.add(bridge, name: "agDrag")
-    ucc.add(bridge, name: "agBarWidth")
-
-    let cfg = WKWebViewConfiguration()
-    cfg.userContentController = ucc
-
-    webView = WKWebView(frame: NSRect(origin: .zero, size: collapsedSize), configuration: cfg)
-    webView.navigationDelegate = self
-    webView.setValue(false, forKey: "drawsBackground")
-    webView.autoresizingMask = [.width, .height]
-    panel.contentView = webView
   }
 
   private func resolveServerScriptPath() -> String? {
@@ -234,7 +293,8 @@ final class AppController: NSObject, NSApplicationDelegate, WKNavigationDelegate
           self.launchLocalServer()
           try? await Task.sleep(nanoseconds: 650_000_000)
         }
-        self.loadOverlayPage()
+        self.serverReady = true
+        self.syncWindowPlacement(force: true)
         self.refreshStatusPill()
       }
     }.resume()
@@ -246,19 +306,13 @@ final class AppController: NSObject, NSApplicationDelegate, WKNavigationDelegate
     proc.executableURL = URL(fileURLWithPath: "/bin/bash")
     proc.arguments = [
       "-c",
-      "export PATH=\"/opt/homebrew/bin:/usr/local/bin:$PATH\"; exec node --no-warnings \"\(serverJs)\""
+      "export PATH=\"$HOME/.local/node/bin:/opt/homebrew/bin:/usr/local/bin:$PATH\"; exec node --no-warnings \"\(serverJs)\""
     ]
     proc.environment = ProcessInfo.processInfo.environment.merging(["ATB_PORT": "\(port)"]) { _, new in new }
     proc.standardOutput = Pipe()
     proc.standardError = Pipe()
     try? proc.run()
     backendProcess = proc
-  }
-
-  private func loadOverlayPage() {
-    if let url = URL(string: "http://127.0.0.1:\(port)/t3-overlay.html") {
-      webView.load(URLRequest(url: url))
-    }
   }
 
   private func refreshStatusPill() {
@@ -277,13 +331,13 @@ final class AppController: NSObject, NSApplicationDelegate, WKNavigationDelegate
     }.resume()
   }
 
-  private func findTargetWindow(pid: pid_t) -> (rect: CGRect, occluded: Bool)? {
+  private func findAllAntigravityWindows(pid: pid_t) -> [(windowId: CGWindowID, rect: CGRect, occluded: Bool)] {
     guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else {
-      return nil
+      return []
     }
     let selfPid = ProcessInfo.processInfo.processIdentifier
     var coveringWindows: [CGRect] = []
-    var targetRect: CGRect?
+    var results: [(windowId: CGWindowID, rect: CGRect, occluded: Bool)] = []
 
     for entry in list {
       let ownerPid = (entry[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value ?? -1
@@ -296,106 +350,158 @@ final class AppController: NSObject, NSApplicationDelegate, WKNavigationDelegate
             let h = (bounds["Height"] as? NSNumber)?.doubleValue,
             w >= 260 && h >= 180 else { continue }
       let rect = CGRect(x: x, y: y, width: w, height: h)
+
       if ownerPid == pid {
-        if w >= 420 && h >= 280 {
-          targetRect = rect
-          break
+        if w >= 420 && h >= 280,
+           let widNum = entry[kCGWindowNumber as String] as? NSNumber {
+          let wid = CGWindowID(widNum.uint32Value)
+          let probe = CGPoint(x: rect.midX, y: rect.minY + 18)
+          let occluded = coveringWindows.contains { $0.contains(probe) }
+          results.append((wid, rect, occluded))
         }
+        // 前面的 Antigravity 窗口也会遮挡后面的 Antigravity 窗口
+        coveringWindows.append(rect)
       } else {
         coveringWindows.append(rect)
       }
     }
 
-    guard let found = targetRect else { return nil }
-    let probe = CGPoint(x: max(found.minX + 60, found.maxX - rightMargin - 100), y: found.minY + 16)
-    let occluded = coveringWindows.contains { $0.contains(probe) }
-    return (found, occluded)
+    return results
   }
 
-  private func resolveTargetHostApp() -> NSRunningApplication? {
+  private func resolveAntigravityApp() -> NSRunningApplication? {
     let front = NSWorkspace.shared.frontmostApplication
-    // 仅当 Antigravity 或 T3 Code 处于前台时展示；切到任何其他应用/桌面立刻隐藏
-    if let f = front, let bid = f.bundleIdentifier, targetBundleIds.contains(bid) {
-      lastHostBundleId = bid
+    // 严格仅当 Antigravity 处于前台时展示；切到任何其他应用/桌面立刻隐藏
+    if let f = front, f.bundleIdentifier == targetBundleId {
       return f
     }
-    // 面板展开态时（自身短暂获取焦点），保持附着在最近一次宿主窗口上
-    if isExpanded {
-      let running = NSWorkspace.shared.runningApplications
-      return running.first(where: { $0.bundleIdentifier == lastHostBundleId })
-        ?? running.first(where: { $0.bundleIdentifier.map { targetBundleIds.contains($0) } ?? false })
+    // 面板展开态时（自身短暂获取焦点），保持附着在 Antigravity 窗口上
+    if expandedWindowId != nil {
+      return NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == targetBundleId })
     }
     return nil
   }
 
+  private func hideAllPanels() {
+    for slot in slots.values {
+      if slot.panel.isVisible {
+        slot.panel.orderOut(nil)
+      }
+    }
+  }
+
   private func syncWindowPlacement(force: Bool = false) {
+    guard serverReady else { return }
     guard overlayVisible else {
-      if panel.isVisible { panel.orderOut(nil) }
+      hideAllPanels()
       return
     }
 
-    let primaryScreenH = NSScreen.screens.first?.frame.height ?? 900
-    guard let hostApp = resolveTargetHostApp(),
-          let winInfo = findTargetWindow(pid: hostApp.processIdentifier) else {
-      if !isExpanded && panel.isVisible {
-        panel.orderOut(nil)
+    guard let agyApp = resolveAntigravityApp() else {
+      if expandedWindowId == nil {
+        hideAllPanels()
       }
       return
     }
 
-    if winInfo.occluded && !isExpanded {
-      if panel.isVisible { panel.orderOut(nil) }
+    let windows = findAllAntigravityWindows(pid: agyApp.processIdentifier)
+    if windows.isEmpty {
+      if expandedWindowId == nil {
+        hideAllPanels()
+      }
       return
     }
 
-    let qRect = winInfo.rect
-    let size: NSSize
-    if isExpanded {
-      size = NSSize(
-        width: min(expandedSize.width, max(640, qRect.width - 28)),
-        height: min(expandedSize.height, max(520, qRect.height - 44))
-      )
-    } else {
-      size = collapsedSize
+    let activeIds = Set(windows.map { $0.windowId })
+    // 回收已关闭窗口对应的 OverlaySlot
+    for existingId in Array(slots.keys) where !activeIds.contains(existingId) {
+      if expandedWindowId == existingId {
+        expandedWindowId = nil
+      }
+      slots[existingId]?.destroy()
+      slots.removeValue(forKey: existingId)
     }
 
-    let safeMinY = qRect.minY < 20 ? 28 : qRect.minY
-    // 在宿主窗口顶部水平居中展示（避免遮挡右侧 Open IDE 等按钮）
-    let centerX = qRect.midX - size.width / 2
-    let clampedX = max(qRect.minX + 12, min(qRect.maxX - size.width - 12, centerX))
-    let topY = primaryScreenH - safeMinY - (isExpanded ? 32 : 4)
-    let nextFrame = NSRect(
-      x: clampedX,
-      y: topY - size.height,
-      width: size.width,
-      height: size.height
-    )
-    if force ||
-       abs(panel.frame.origin.x - nextFrame.origin.x) > 0.5 ||
-       abs(panel.frame.origin.y - nextFrame.origin.y) > 0.5 ||
-       abs(panel.frame.width - nextFrame.width) > 0.5 ||
-       abs(panel.frame.height - nextFrame.height) > 0.5 {
-      panel.setFrame(nextFrame, display: true)
-    }
-    if !panel.isVisible {
-      panel.orderFrontRegardless()
+    let primaryScreenH = NSScreen.screens.first?.frame.height ?? 900
+
+    for win in windows {
+      let isThisExpanded = (expandedWindowId == win.windowId)
+      // 如果别的窗口正处于展开态，隐藏其他窗口的小条避免干扰；若被遮挡且未展开也隐藏
+      if (expandedWindowId != nil && !isThisExpanded) || (win.occluded && !isThisExpanded) {
+        if let slot = slots[win.windowId], slot.panel.isVisible {
+          slot.panel.orderOut(nil)
+        }
+        continue
+      }
+
+      let slot: OverlaySlot
+      if let existing = slots[win.windowId] {
+        slot = existing
+      } else {
+        slot = OverlaySlot(
+          windowId: win.windowId,
+          owner: self,
+          collapsedSize: collapsedSize,
+          navDelegate: self,
+          url: overlayURL
+        )
+        slots[win.windowId] = slot
+      }
+
+      let qRect = win.rect
+      let size: NSSize
+      if isThisExpanded {
+        size = NSSize(
+          width: min(expandedSize.width, max(640, qRect.width - 28)),
+          height: min(expandedSize.height, max(520, qRect.height - 44))
+        )
+      } else {
+        size = collapsedSize
+      }
+
+      let safeMinY = qRect.minY < 20 ? 28 : qRect.minY
+      let centerX = qRect.midX - size.width / 2
+      let clampedX = max(qRect.minX + 12, min(qRect.maxX - size.width - 12, centerX))
+      let topY = primaryScreenH - safeMinY - (isThisExpanded ? 32 : 4)
+      let nextFrame = NSRect(
+        x: clampedX,
+        y: topY - size.height,
+        width: size.width,
+        height: size.height
+      )
+
+      if force ||
+         abs(slot.panel.frame.origin.x - nextFrame.origin.x) > 0.5 ||
+         abs(slot.panel.frame.origin.y - nextFrame.origin.y) > 0.5 ||
+         abs(slot.panel.frame.width - nextFrame.width) > 0.5 ||
+         abs(slot.panel.frame.height - nextFrame.height) > 0.5 {
+        slot.panel.setFrame(nextFrame, display: true)
+      }
+      if !slot.panel.isVisible {
+        slot.panel.orderFrontRegardless()
+      }
     }
   }
 
   private func collapsePanel() {
-    webView.evaluateJavaScript("window.__ATBControl?.closeBoard?.();", completionHandler: nil)
-    setExpanded(false)
+    if let wid = expandedWindowId, let slot = slots[wid] {
+      slot.webView.evaluateJavaScript("window.__ATBControl?.closeBoard?.();", completionHandler: nil)
+      setExpanded(false, for: wid)
+    }
   }
 
   @objc private func toggleBoardFromMenu() {
-    if isExpanded {
+    if expandedWindowId != nil {
       collapsePanel()
     } else {
-      let running = NSWorkspace.shared.runningApplications
-      let target = running.first(where: { $0.bundleIdentifier == lastHostBundleId })
-        ?? running.first(where: { $0.bundleIdentifier.map { targetBundleIds.contains($0) } ?? false })
-      target?.activate()
-      webView.evaluateJavaScript("window.__ATBControl?.toggleBoard?.();", completionHandler: nil)
+      if let agy = NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == targetBundleId }) {
+        agy.activate()
+        syncWindowPlacement(force: true)
+        if let firstWin = findAllAntigravityWindows(pid: agy.processIdentifier).first,
+           let slot = slots[firstWin.windowId] {
+          slot.webView.evaluateJavaScript("window.__ATBControl?.toggleBoard?.();", completionHandler: nil)
+        }
+      }
     }
   }
 
@@ -408,7 +514,7 @@ final class AppController: NSObject, NSApplicationDelegate, WKNavigationDelegate
   @objc private func toggleBarVisibility(_ sender: NSMenuItem) {
     overlayVisible.toggle()
     sender.state = overlayVisible ? .on : .off
-    syncWindowPlacement()
+    syncWindowPlacement(force: true)
   }
 
   @objc private func resetBarPosition() {

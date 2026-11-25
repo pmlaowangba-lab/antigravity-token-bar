@@ -149,9 +149,9 @@
   /** 超过一千万用亿（两位）。精确合计旁仍保留完整 token 数。 */
   function fmtWan(n, digits) {
     const v = Math.max(0, Number(n) || 0);
-    if (v >= 10000000) return `${(v / 100000000).toFixed(2)}亿`;
+    if (v >= 100000000) return `${(v / 100000000).toFixed(2)}亿`;
     if (v >= 10000) {
-      const d = digits != null ? digits : (v >= 1000000 ? 2 : 1);
+      const d = digits != null ? digits : 1;
       return `${(v / 10000).toFixed(d)}万`;
     }
     return Math.round(v).toLocaleString('en-US');
