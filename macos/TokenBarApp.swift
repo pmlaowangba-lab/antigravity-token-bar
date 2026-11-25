@@ -246,7 +246,7 @@ final class AppController: NSObject, NSApplicationDelegate, WKNavigationDelegate
     proc.executableURL = URL(fileURLWithPath: "/bin/bash")
     proc.arguments = [
       "-c",
-      "export PATH=\"/opt/homebrew/bin:/usr/local/bin:$PATH\"; exec node --no-warnings \"\(serverJs)\""
+      "export PATH=\"$HOME/.local/node/bin:/opt/homebrew/bin:/usr/local/bin:$PATH\"; exec node --no-warnings \"\(serverJs)\""
     ]
     proc.environment = ProcessInfo.processInfo.environment.merging(["ATB_PORT": "\(port)"]) { _, new in new }
     proc.standardOutput = Pipe()
