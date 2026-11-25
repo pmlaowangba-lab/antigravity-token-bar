@@ -455,8 +455,6 @@ function createQuotaService(options = {}) {
         };
         quotaCache = { fetchedAtMs: Date.now() - cacheTtlMs + 15_000, data };
         return data;
-      } finally {
-        if (inflight === req) inflight = null;
       }
     })();
     inflight = req;
