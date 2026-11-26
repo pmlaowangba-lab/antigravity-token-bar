@@ -200,9 +200,10 @@
       return el.textContent || '';
     })();
 
-    const tpsM = inlineText.match(/([0-9]+)\s*tok\/s/i);
+    const tpsM = inlineText.match(/([0-9]+(?:\.[0-9]+)?)\s*tok\/s/i);
     const holdM = inlineText.match(/(?:TTFT|Hold)\s+([0-9.]+)s/i);
     const ctxM = inlineText.match(/Ctx\s+([^/]+)\/([^\s(]+)\s*\((\d+)%\)/i);
+    const pctOnlyM = inlineText.match(/(\d+)%/);
     const outM = inlineText.match(/Out\s+([^\s·]+)/i);
 
     const speedRow = rows['生成速度'] || '';
@@ -218,7 +219,9 @@
 
     const waterRow = rows['压缩水位线'] || '';
     const waterPctM = waterRow.match(/\((\d+)%\)/);
+    const waterPairM = waterRow.match(/^([^/]+)\/\s*([^\s(]+)/);
     const waterUsedM = waterRow.match(/^([^/]+)\//);
+    const waterRemM = waterRow.match(/距压缩余\s*([^\s·]+)/);
 
     const inputRow = rows['累计输入量'] || '';
     const sessCacheM = inputRow.match(/命中率\s+([0-9.]+)%/);
@@ -230,7 +233,9 @@
       ? Number(waterPctM[1])
       : ctxM
         ? Number(ctxM[3])
-        : 0;
+        : pctOnlyM
+          ? Number(pctOnlyM[1])
+          : 0;
     let healthTone = 'good';
     let healthLabel = '正常';
     if (usedPct >= 88) {
@@ -260,8 +265,9 @@
     return {
       source: 'patch-metrics',
       usedPercent: usedPct,
-      contextUsedLabel: waterUsedM ? waterUsedM[1].trim() : ctxM ? ctxM[1].trim() : '—',
-      contextLimitLabel: ctxM ? ctxM[2].trim() : '512K',
+      contextUsedLabel: waterPairM ? waterPairM[1].trim() : waterUsedM ? waterUsedM[1].trim() : ctxM ? ctxM[1].trim() : '—',
+      contextLimitLabel: waterPairM ? waterPairM[2].trim() : ctxM ? ctxM[2].trim() : '512K',
+      contextRemainLabel: waterRemM ? waterRemM[1].trim() : '',
       stepCacheRate: ctxCacheM ? Number(ctxCacheM[1]) : 0,
       sessionCacheRate: sessCacheM ? Number(sessCacheM[1]) : 0,
       healthTone,
@@ -990,7 +996,7 @@
         : fmtMoney(sess.sessionTotals.todayUSD, fx, state.currency);
     const usedLabel = live?.contextUsedLabel || fmtTokens(sess?.contextUsed || 0);
     const limitLabel = live?.contextLimitLabel || fmtTokens(sess?.contextLimit || 512000);
-    const remLabel = sess ? fmtTokens(sess.remainingTokens) : '—';
+    const remLabel = live?.contextRemainLabel || (sess ? fmtTokens(sess.remainingTokens) : '—');
     const hitRate = ((live?.sessionCacheRate > 0 ? live.sessionCacheRate : null) ?? sess?.sessionTotals?.cacheHitRate ?? 0).toFixed(1);
     const barTone = tone === 'good' ? 'info' : tone;
     const todaySessMoney =
@@ -1008,7 +1014,7 @@
     refs.sessionPair.innerHTML = `
       <div class="ag-ledger-card">
         <div class="ag-ledger-card-head">
-          <span>核心用量速览（512K 压缩水位线）</span>
+          <span>核心用量速览（${esc(limitLabel)} 压缩水位线）</span>
           <span class="ag-ledger-head-side">
             <span class="ag-ledger-session-amt">本路今日 ${esc(todayMoney)}</span>
             <span class="ag-ledger-badge" data-tone="${esc(tone)}">${esc(badge)}</span>
