@@ -441,22 +441,23 @@ html.ag-ledger-panel-open #ag-live-metrics-tooltip {
   position: fixed;
   inset: 0;
   z-index: 2147483000;
-  -webkit-app-region: no-drag;
   background: rgba(0, 0, 0, 0.16);
   opacity: 0;
+  visibility: hidden;
   pointer-events: none;
-  transition: opacity 0.15s ease;
+  transition: opacity 0.15s ease, visibility 0.15s ease;
 }
 
 #ag-ledger-backdrop[data-open="1"] {
   opacity: 1;
+  visibility: visible;
   pointer-events: auto;
+  -webkit-app-region: no-drag;
 }
 
 #ag-ledger-board {
   position: fixed;
   z-index: 2147483001;
-  -webkit-app-region: no-drag;
   left: 50%;
   right: auto;
   top: calc(var(--ag-ledger-dock-top, 8px) + 38px);
@@ -478,16 +479,19 @@ html.ag-ledger-panel-open #ag-live-metrics-tooltip {
   line-height: 1.4;
   font-variant-numeric: tabular-nums;
   opacity: 0;
+  visibility: hidden;
   transform: translateX(-50%) translateY(-4px) scale(0.99);
   pointer-events: none;
-  transition: opacity 0.15s ease, transform 0.15s ease;
+  transition: opacity 0.15s ease, transform 0.15s ease, visibility 0.15s ease;
   box-sizing: border-box;
 }
 
 #ag-ledger-board[data-open="1"] {
   opacity: 1;
+  visibility: visible;
   transform: translateX(-50%) translateY(0) scale(1);
   pointer-events: auto;
+  -webkit-app-region: no-drag;
 }
 
 .ag-ledger-fit {
